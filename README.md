@@ -1,4 +1,4 @@
-# NGDB - Next Generateion Database
+# NGDB - Next Generation Database
 
 A RocksDB wrapper for Rust with ACID transactions, automatic backups, and distributed replication.
 
