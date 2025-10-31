@@ -25,9 +25,9 @@ use tracing::{debug, error, info, instrument, warn};
 ///
 /// ```rust,no_run
 /// use ngdb::{Database, DatabaseConfig, Storable};
-/// use serde::{Deserialize, Serialize};
+/// use bincode::{Decode, Encode};
 ///
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(Encode, Decode)]
 /// struct User {
 ///     id: u64,
 ///     name: String,
@@ -92,7 +92,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// # use ngdb::{Database, Storable};
-    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # #[derive(bincode::Encode, bincode::Decode)]
     /// # struct User { id: u64 }
     /// # impl Storable for User {
     /// #     type Key = u64;
@@ -266,7 +266,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// # use ngdb::{Database, Storable};
-    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # #[derive(bincode::Encode, bincode::Decode)]
     /// # struct Account { id: u64, balance: i64 }
     /// # impl Storable for Account {
     /// #     type Key = u64;
@@ -411,7 +411,7 @@ impl<T: Storable> Collection<T> {
     ///
     /// ```rust,no_run
     /// # use ngdb::{Collection, Storable};
-    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # #[derive(bincode::Encode, bincode::Decode)]
     /// # struct User { id: u64, name: String }
     /// # impl Storable for User {
     /// #     type Key = u64;
@@ -933,7 +933,7 @@ impl<T: Storable> Iterator<T> {
 ///
 /// ```rust,no_run
 /// # use ngdb::{Database, Storable};
-/// # #[derive(serde::Serialize, serde::Deserialize)]
+/// # #[derive(bincode::Encode, bincode::Decode)]
 /// # struct Account { id: u64, balance: i64 }
 /// # impl Storable for Account {
 /// #     type Key = u64;
@@ -1345,11 +1345,12 @@ unsafe impl<'txn, T: Storable> Sync for TransactionCollection<'txn, T> {}
 
 #[cfg(test)]
 mod tests {
+    use bincode::{Decode, Encode};
+
     use super::*;
     use crate::DatabaseConfig;
-    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Encode, Decode)]
     struct TestItem {
         id: u64,
         data: String,

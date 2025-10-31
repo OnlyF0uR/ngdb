@@ -37,21 +37,18 @@ pub struct DatabaseConfig {
 
 /// Compression type for database
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CompressionType {
     None,
     Snappy,
     Zlib,
     Bz2,
+    #[default]
     Lz4,
     Lz4hc,
     Zstd,
 }
 
-impl Default for CompressionType {
-    fn default() -> Self {
-        CompressionType::Lz4
-    }
-}
 
 impl CompressionType {
     fn to_rocksdb(&self) -> rocksdb::DBCompressionType {
@@ -274,6 +271,7 @@ impl DatabaseConfig {
 
 /// Additional options for advanced database configuration
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct OpenOptions {
     /// List of peer nodes for future replication
     pub peer_nodes: Vec<String>,
@@ -285,15 +283,6 @@ pub struct OpenOptions {
     pub node_id: Option<String>,
 }
 
-impl Default for OpenOptions {
-    fn default() -> Self {
-        Self {
-            peer_nodes: Vec::new(),
-            enable_replication: false,
-            node_id: None,
-        }
-    }
-}
 
 impl OpenOptions {
     /// Create new open options

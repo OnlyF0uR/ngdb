@@ -1,11 +1,11 @@
 //! Thread-safe transaction example demonstrating concurrent access patterns
 
+use bincode::{Decode, Encode};
 use ngdb::{DatabaseConfig, Result, Storable};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::thread;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Encode, Decode, PartialEq)]
 struct Counter {
     id: String,
     value: i64,

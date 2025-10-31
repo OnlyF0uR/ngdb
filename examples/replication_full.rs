@@ -1,9 +1,9 @@
 //! Comprehensive replication example demonstrating conflict resolution and node coordination
 
+use bincode::{Decode, Encode};
 use ngdb::{DatabaseConfig, Result, Storable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct Record {
     id: u64,
     value: String,

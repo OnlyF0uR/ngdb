@@ -1,9 +1,9 @@
 //! Advanced example demonstrating batches, snapshots, and iterations
 
+use bincode::{Decode, Encode};
 use ngdb::{DatabaseConfig, IterationStatus, Result, Storable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct Record {
     id: u64,
     value: String,

@@ -1,9 +1,9 @@
 //! Basic replication example demonstrating replication log creation and processing
 
+use bincode::{Decode, Encode};
 use ngdb::{DatabaseConfig, Result, Storable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct Document {
     id: u64,
     title: String,

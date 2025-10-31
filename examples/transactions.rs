@@ -1,9 +1,9 @@
 //! Transaction example demonstrating atomic operations across multiple writes
 
+use bincode::{Decode, Encode};
 use ngdb::{DatabaseConfig, Result, Storable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct Account {
     id: u64,
     name: String,

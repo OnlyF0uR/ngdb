@@ -1,9 +1,9 @@
 //! Backup and restore example demonstrating disaster recovery capabilities
 
+use bincode::{Decode, Encode};
 use ngdb::{Database, DatabaseConfig, Result, Storable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct User {
     id: u64,
     name: String,
@@ -18,7 +18,7 @@ impl Storable for User {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct Post {
     id: u64,
     user_id: u64,

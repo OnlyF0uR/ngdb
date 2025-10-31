@@ -4,7 +4,10 @@
 //! work seamlessly with NGDB.
 
 use crate::{Error, Result};
-use serde::{Deserialize, Serialize};
+use bincode::{config, Decode, Encode};
+
+// Type alias for bincode decode context - bincode 2.0 uses () as the context type
+type BincodeConfig = ();
 
 /// The core trait that types must implement to be stored in NGDB.
 ///
@@ -15,9 +18,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// ```rust
 /// use ngdb::Storable;
-/// use serde::{Deserialize, Serialize};
+/// use bincode::{Decode, Encode};
 ///
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(Encode, Decode)]
 /// struct User {
 ///     id: u64,
 ///     name: String,
@@ -32,7 +35,7 @@ use serde::{Deserialize, Serialize};
 ///     }
 /// }
 /// ```
-pub trait Storable: Serialize + for<'de> Deserialize<'de> + Sized {
+pub trait Storable: Encode + Decode<BincodeConfig> + Sized {
     /// The key type for this storable type.
     /// Common types: u64, String, (u64, String), etc.
     type Key: KeyType;
@@ -58,7 +61,7 @@ pub trait Storable: Serialize + for<'de> Deserialize<'de> + Sized {
 ///
 /// This trait is automatically implemented for common key types.
 pub trait KeyType:
-    Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + std::fmt::Debug + 'static
+    Encode + Decode<BincodeConfig> + Clone + Send + Sync + std::fmt::Debug + 'static
 {
     /// Convert the key to bytes for storage.
     fn to_bytes(&self) -> Result<Vec<u8>>;
@@ -72,101 +75,121 @@ pub trait KeyType:
 
 impl KeyType for u8 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for u16 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for u32 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for u64 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for u128 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for i8 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for i16 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for i32 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for i64 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
 impl KeyType for i128 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
@@ -191,9 +214,6 @@ impl KeyType for Vec<u8> {
     }
 }
 
-// Note: Generic array [u8; N] implementation removed due to serde limitations
-// For fixed-size byte arrays, use Vec<u8> or implement KeyType manually for specific sizes
-
 // Tuple implementations for composite keys
 impl<A, B> KeyType for (A, B)
 where
@@ -201,11 +221,13 @@ where
     B: KeyType,
 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
@@ -216,11 +238,13 @@ where
     C: KeyType,
 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
@@ -232,11 +256,13 @@ where
     D: KeyType,
 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _)| value)
+            .map_err(Into::into)
     }
 }
 
@@ -267,6 +293,4 @@ mod tests {
         let recovered = <(u64, String)>::from_bytes(&bytes).unwrap();
         assert_eq!(key, recovered);
     }
-
-    // Array test removed - generic arrays not fully supported by serde in all contexts
 }

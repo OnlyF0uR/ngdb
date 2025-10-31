@@ -4,7 +4,10 @@
 //! pluggable codecs for encoding/decoding values.
 
 use crate::{Error, Result};
-use serde::{Deserialize, Serialize};
+use bincode::{config, Decode, Encode};
+
+// Type alias for bincode decode context - bincode 2.0 uses () as the context type
+type BincodeConfig = ();
 
 /// Trait for encoding and decoding values to/from bytes.
 ///
@@ -13,10 +16,10 @@ use serde::{Deserialize, Serialize};
 /// performance and compatibility.
 pub trait Codec: Send + Sync + 'static {
     /// Serialize a value to bytes
-    fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>>;
+    fn encode<T: Encode>(&self, value: &T) -> Result<Vec<u8>>;
 
     /// Deserialize bytes to a value
-    fn decode<T: for<'de> Deserialize<'de>>(&self, bytes: &[u8]) -> Result<T>;
+    fn decode<T: Decode<BincodeConfig>>(&self, bytes: &[u8]) -> Result<T>;
 }
 
 /// Bincode-based codec implementation (default)
@@ -34,13 +37,14 @@ impl BincodeCodec {
 }
 
 impl Codec for BincodeCodec {
-    fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>> {
-        bincode::serialize(value)
+    fn encode<T: Encode>(&self, value: &T) -> Result<Vec<u8>> {
+        bincode::encode_to_vec(value, config::standard())
             .map_err(|e| Error::Serialization(format!("Failed to serialize value: {}", e)))
     }
 
-    fn decode<T: for<'de> Deserialize<'de>>(&self, bytes: &[u8]) -> Result<T> {
-        bincode::deserialize(bytes)
+    fn decode<T: Decode<BincodeConfig>>(&self, bytes: &[u8]) -> Result<T> {
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _len)| value)
             .map_err(|e| Error::Deserialization(format!("Failed to deserialize value: {}", e)))
     }
 }
@@ -51,14 +55,17 @@ pub mod helpers {
 
     /// Serialize a value using bincode
     #[inline]
-    pub fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-        bincode::serialize(value).map_err(Into::into)
+    pub fn serialize<T: Encode>(value: &T) -> Result<Vec<u8>> {
+        bincode::encode_to_vec(value, config::standard())
+            .map_err(|e| Error::Serialization(format!("Serialization failed: {}", e)))
     }
 
     /// Deserialize a value using bincode
     #[inline]
-    pub fn deserialize<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
-        bincode::deserialize(bytes).map_err(Into::into)
+    pub fn deserialize<T: Decode<BincodeConfig>>(bytes: &[u8]) -> Result<T> {
+        bincode::decode_from_slice(bytes, config::standard())
+            .map(|(value, _len)| value)
+            .map_err(|e| Error::Deserialization(format!("Deserialization failed: {}", e)))
     }
 }
 
@@ -66,7 +73,7 @@ pub mod helpers {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, PartialEq, Encode, Decode)]
     struct TestStruct {
         id: u64,
         name: String,

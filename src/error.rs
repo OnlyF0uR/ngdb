@@ -119,23 +119,17 @@ impl From<io::Error> for Error {
     }
 }
 
-// Convert from bincode::Error to our Error type
-impl From<bincode::Error> for Error {
-    fn from(err: bincode::Error) -> Self {
-        match *err {
-            bincode::ErrorKind::Io(io_err) => Error::Io(io_err),
-            bincode::ErrorKind::InvalidUtf8Encoding(_)
-            | bincode::ErrorKind::InvalidBoolEncoding(_)
-            | bincode::ErrorKind::InvalidCharEncoding
-            | bincode::ErrorKind::InvalidTagEncoding(_)
-            | bincode::ErrorKind::DeserializeAnyNotSupported => {
-                Error::Deserialization(err.to_string())
-            }
-            bincode::ErrorKind::SequenceMustHaveLength | bincode::ErrorKind::SizeLimit => {
-                Error::Serialization(err.to_string())
-            }
-            bincode::ErrorKind::Custom(msg) => Error::Database(msg.to_string()),
-        }
+// Convert from bincode 2.0 encode error to our Error type
+impl From<bincode::error::EncodeError> for Error {
+    fn from(err: bincode::error::EncodeError) -> Self {
+        Error::Serialization(format!("Bincode encode error: {}", err))
+    }
+}
+
+// Convert from bincode 2.0 decode error to our Error type
+impl From<bincode::error::DecodeError> for Error {
+    fn from(err: bincode::error::DecodeError) -> Self {
+        Error::Deserialization(format!("Bincode decode error: {}", err))
     }
 }
 

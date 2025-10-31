@@ -16,9 +16,9 @@
 //!
 //! ```rust,no_run
 //! use ngdb::{Database, DatabaseConfig, Storable};
-//! use serde::{Deserialize, Serialize};
+//! use bincode::{Decode, Encode};
 //!
-//! #[derive(Debug, Serialize, Deserialize)]
+//! #[derive(Debug, Encode, Decode)]
 //! struct User {
 //!     id: u64,
 //!     name: String,
@@ -61,8 +61,8 @@
 //!
 //! ```rust,no_run
 //! # use ngdb::{Database, Storable};
-//! # use serde::{Deserialize, Serialize};
-//! # #[derive(Serialize, Deserialize)]
+//! # use bincode::{Decode, Encode};
+//! # #[derive(Encode, Decode)]
 //! # struct User { id: u64, name: String }
 //! # impl Storable for User {
 //! #     type Key = u64;
@@ -84,8 +84,8 @@
 //!
 //! ```rust,no_run
 //! # use ngdb::{Database, Storable};
-//! # use serde::{Deserialize, Serialize};
-//! # #[derive(Serialize, Deserialize)]
+//! # use bincode::{Decode, Encode};
+//! # #[derive(Encode, Decode)]
 //! # struct Account { id: u64, balance: i64 }
 //! # impl Storable for Account {
 //! #     type Key = u64;
@@ -125,15 +125,15 @@ pub mod prelude {
         BackupInfo, Collection, Database, DatabaseConfig, Error, IterationStatus, Result, Storable,
         Transaction,
     };
-    pub use serde::{Deserialize, Serialize};
+    pub use bincode::{Decode, Encode};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
+    use bincode::{Decode, Encode};
 
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Encode, Decode)]
     struct TestData {
         id: u64,
         value: String,

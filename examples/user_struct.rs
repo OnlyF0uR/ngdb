@@ -1,9 +1,9 @@
 //! User struct example demonstrating custom types with validation
 
+use bincode::{Decode, Encode};
 use ngdb::{DatabaseConfig, Result, Storable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 struct User {
     id: u64,
     username: String,

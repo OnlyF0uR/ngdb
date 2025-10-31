@@ -2,10 +2,10 @@
 //!
 //! Demonstrates core CRUD operations with a simple product database.
 
+use bincode::{Decode, Encode};
 use ngdb::{DatabaseConfig, Result, Storable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 struct Product {
     id: u64,
     name: String,
