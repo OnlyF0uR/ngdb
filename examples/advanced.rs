@@ -25,7 +25,6 @@ fn main() -> Result<()> {
     let records = db.collection::<Record>("records")?;
 
     // Batch operations - efficient bulk writes
-    println!("Batch operations:");
     let mut batch = records.batch();
     for i in 0..100 {
         batch.put(&Record {
@@ -33,18 +32,14 @@ fn main() -> Result<()> {
             value: format!("record_{}", i),
         })?;
     }
-    println!("  Added {} operations to batch", batch.len());
     batch.commit()?;
-    println!("  Batch committed");
 
     // Multi-get - efficient bulk reads
-    println!("\nMulti-get:");
     let keys: Vec<u64> = vec![0, 10, 20, 30];
     let results = records.get_many(&keys)?;
-    println!("  Retrieved {} records", results.len());
+    assert_eq!(results.len(), 4);
 
     // Snapshots - consistent point-in-time view
-    println!("\nSnapshot:");
     let snapshot = records.snapshot();
 
     // Modify data after snapshot
@@ -56,23 +51,18 @@ fn main() -> Result<()> {
     // Snapshot still sees old data
     let snapshot_value = snapshot.get(&0)?;
     let current_value = records.get(&0)?;
-    println!(
-        "  Snapshot sees: {:?}",
-        snapshot_value.as_ref().map(|r| &r.value)
-    );
-    println!(
-        "  Current sees: {:?}",
+    assert_ne!(
+        snapshot_value.as_ref().map(|r| &r.value),
         current_value.as_ref().map(|r| &r.value)
     );
 
     // Iteration
-    println!("\nIteration:");
     let count = records.iter()?.count()?;
-    println!("  Total records: {}", count);
+    assert_eq!(count, 100);
 
     // Collect all into vector
     let all = records.iter()?.collect_all()?;
-    println!("  Collected {} records", all.len());
+    assert_eq!(all.len(), 100);
 
     // Iterate with callback
     let mut found = 0;
@@ -83,16 +73,12 @@ fn main() -> Result<()> {
         record.id < 50 // Stop at 50
     })?;
 
-    match status {
-        IterationStatus::Completed => println!("  Iteration completed"),
-        IterationStatus::StoppedEarly => println!("  Iteration stopped early"),
-    }
-    println!("  Found {} records divisible by 10", found);
+    assert!(matches!(status, IterationStatus::StoppedEarly));
+    assert!(found > 0);
 
     // Iterate from a starting point
-    println!("\nIterate from key 50:");
     let from_50 = records.iter_from(&50)?.count()?;
-    println!("  Records from 50: {}", from_50);
+    assert_eq!(from_50, 50);
 
     // Range compaction
     println!("\nRange operations:");

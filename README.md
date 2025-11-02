@@ -204,7 +204,7 @@ send_to_peers(log).await?;
 ```rust
 // In your network handler
 async fn handle_replication(log: ReplicationLog) -> Result<()> {
-    db.apply_replication(log)?;
+    manager.apply_replication(log)?;
     Ok(())
 }
 ```

@@ -11,6 +11,7 @@
 //! - **Thread-safe**: Built on `Arc` with multi-threaded column family support
 //! - **Column Families**: Store multiple types in one database using collections
 //! - **Efficient**: Multi-get operations, batching, transactions, and snapshots
+//! - **Replication**: Built-in support for multi-node replication with conflict resolution
 //!
 //! ## Quick Start
 //!
@@ -102,11 +103,56 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Replication
+//!
+//! NGDB provides production-ready replication support for multi-node deployments:
+//!
+//! ```rust,no_run
+//! # use ngdb::{DatabaseConfig, ReplicationConfig, ReplicationManager, ReplicationLog, ReplicationOperation};
+//! # fn example() -> Result<(), ngdb::Error> {
+//! // Setup replica node
+//! let db = DatabaseConfig::new("./data/replica")
+//!     .create_if_missing(true)
+//!     .add_column_family("users")
+//!     .open()?;
+//!
+//! // Configure replication
+//! let config = ReplicationConfig::new("replica-1")
+//!     .enable()
+//!     .with_peers(vec!["primary-1".to_string()]);
+//!
+//! let manager = ReplicationManager::new(db, config)?;
+//!
+//! // Apply replication logs from primary (received via network)
+//! let log = ReplicationLog::new(
+//!     "primary-1".to_string(),
+//!     ReplicationOperation::Put {
+//!         collection: "users".to_string(),
+//!         key: vec![1, 2, 3],
+//!         value: vec![4, 5, 6],
+//!     },
+//! ).with_checksum();
+//!
+//! manager.apply_replication(log)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Features:
+//! - **Idempotent**: Safe to apply the same operation multiple times
+//! - **Conflict Resolution**: LastWriteWins, FirstWriteWins, or Custom strategies
+//! - **Checksums**: Optional data integrity verification
+//! - **Hooks**: Extensible hook system for custom replication logic
+//! - **Batching**: Efficient batch operation replication
+//!
+//! See the `replication` module and examples for more details.
 
 mod config;
 mod db;
 mod error;
 mod refs;
+pub mod replication;
 mod serialization;
 mod traits;
 
@@ -118,14 +164,19 @@ pub use db::{
 };
 pub use error::{Error, Result};
 pub use refs::{Ref, Referable};
+pub use replication::{
+    BatchOp, ConflictResolution, ReplicationConfig, ReplicationHook, ReplicationLog,
+    ReplicationManager, ReplicationOperation, ReplicationStats,
+};
 pub use serialization::{BincodeCodec, Codec};
 pub use traits::{KeyType, Storable};
 
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        BackupInfo, Collection, Database, DatabaseConfig, Error, IterationStatus, Ref, Referable,
-        Result, Storable, Transaction,
+        BackupInfo, Collection, ConflictResolution, Database, DatabaseConfig, Error,
+        IterationStatus, Ref, Referable, ReplicationConfig, ReplicationLog, ReplicationManager,
+        ReplicationOperation, Result, Storable, Transaction,
     };
     pub use borsh::{BorshDeserialize, BorshSerialize};
 }

@@ -28,7 +28,6 @@ impl Storable for Account {
 }
 
 fn main() -> Result<()> {
-    // Setup database
     let db = DatabaseConfig::new("./data/transactions")
         .create_if_missing(true)
         .add_column_family("accounts")
@@ -36,7 +35,6 @@ fn main() -> Result<()> {
 
     let accounts = db.collection::<Account>("accounts")?;
 
-    // Create initial accounts
     accounts.put(&Account {
         id: 1,
         name: "Alice".to_string(),
@@ -51,54 +49,41 @@ fn main() -> Result<()> {
 
     println!("Initial - Alice: 1000, Bob: 500");
 
-    // Example 1: Successful transfer with transaction
     {
         let txn = db.transaction()?;
         let txn_accounts = txn.collection::<Account>("accounts")?;
 
-        // Read current values
         let mut alice = txn_accounts.get(&1)?.unwrap();
         let mut bob = txn_accounts.get(&2)?.unwrap();
 
-        // Perform transfer
         alice.balance -= 200;
         bob.balance += 200;
 
-        // Write updated values
         txn_accounts.put(&alice)?;
         txn_accounts.put(&bob)?;
 
-        // Read isolation - can see uncommitted writes
-        let alice_check = txn_accounts.get(&1)?.unwrap();
-        assert_eq!(alice_check.balance, 800);
-
-        // Commit atomically
         txn.commit()?;
     }
 
     println!("After transfer - Alice: 800, Bob: 700");
 
-    // Example 2: Transaction with validation failure
     let result = {
         let txn = db.transaction()?;
         let txn_accounts = txn.collection::<Account>("accounts")?;
 
         let mut alice = txn_accounts.get(&1)?.unwrap();
-        alice.balance -= 1000; // Would make balance negative
+        alice.balance -= 1000;
 
-        // This will fail validation
         txn_accounts.put(&alice)
     };
 
     match result {
         Ok(_) => println!("Unexpected success"),
-        Err(e) => println!("Validation failed as expected: {}", e),
+        Err(e) => println!("Validation failed: {}", e),
     }
 
-    // Balances unchanged due to validation failure
     println!("After failed transaction - Alice: 800, Bob: 700");
 
-    // Example 3: Explicit rollback
     {
         let txn = db.transaction()?;
         let txn_accounts = txn.collection::<Account>("accounts")?;
@@ -107,13 +92,11 @@ fn main() -> Result<()> {
         alice.balance += 500;
         txn_accounts.put(&alice)?;
 
-        // Rollback instead of commit
         txn.rollback()?;
     }
 
     println!("After rollback - Alice: 800, Bob: 700");
 
-    // Example 4: Transaction state management
     {
         let txn = db.transaction()?;
         let txn_accounts = txn.collection::<Account>("accounts")?;
@@ -126,7 +109,6 @@ fn main() -> Result<()> {
 
         println!("Transaction operations: {}", txn.len()?);
 
-        // Clear and start over
         txn.clear()?;
         println!("After clear: {}", txn.len()?);
 

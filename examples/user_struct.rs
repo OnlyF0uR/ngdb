@@ -46,7 +46,6 @@ impl Storable for User {
 }
 
 fn main() -> Result<()> {
-    // Open database
     let db = DatabaseConfig::new("./data/users_example")
         .create_if_missing(true)
         .add_column_family("users")
@@ -111,9 +110,9 @@ fn main() -> Result<()> {
     // Test validation
     let invalid = User {
         id: 3,
-        username: "ab".to_string(), // Too short
+        username: "ab".to_string(),
         email: "invalid".to_string(),
-        age: 10, // Too young
+        age: 10,
         active: true,
     };
 

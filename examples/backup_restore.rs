@@ -38,7 +38,6 @@ fn create_sample_data(db: &Database) -> Result<()> {
     let users = db.collection::<User>("users")?;
     let posts = db.collection::<Post>("posts")?;
 
-    // Add users
     for i in 1..=5 {
         users.put(&User {
             id: i,
@@ -47,7 +46,6 @@ fn create_sample_data(db: &Database) -> Result<()> {
         })?;
     }
 
-    // Add posts
     for i in 1..=10 {
         posts.put(&Post {
             id: i,
@@ -76,12 +74,10 @@ fn main() -> Result<()> {
     let db_path = temp_dir.join("ngdb_backup_example");
     let backup_path = temp_dir.join("ngdb_backups");
 
-    // Clean up from previous runs
     let _ = std::fs::remove_dir_all(&db_path);
     let _ = std::fs::remove_dir_all(&backup_path);
 
-    // Example 1: Create initial backup
-    println!("Example 1: Creating backup");
+    // Create initial backup
     {
         let db = DatabaseConfig::new(&db_path)
             .create_if_missing(true)
@@ -93,16 +89,14 @@ fn main() -> Result<()> {
         print_counts(&db)?;
 
         db.backup(&backup_path)?;
-        println!("Backup created\n");
+        println!("Backup created");
     }
 
-    // Example 2: List available backups
-    println!("Example 2: Listing backups");
+    // List available backups
     let backups = Database::list_backups(&backup_path)?;
-    println!("Found {} backup(s)\n", backups.len());
+    println!("Found {} backup(s)", backups.len());
 
-    // Example 3: Multiple backups
-    println!("Example 3: Creating second backup");
+    // Create second backup after modifications
     {
         let db = DatabaseConfig::new(&db_path)
             .create_if_missing(false)
@@ -112,7 +106,6 @@ fn main() -> Result<()> {
 
         let users = db.collection::<User>("users")?;
 
-        // Modify data
         users.put(&User {
             id: 6,
             name: "New User".to_string(),
@@ -121,14 +114,12 @@ fn main() -> Result<()> {
         users.delete(&1)?;
 
         db.backup(&backup_path)?;
-        println!("Second backup created");
 
         let backups = Database::list_backups(&backup_path)?;
-        println!("Total backups: {}\n", backups.len());
+        println!("Total backups: {}", backups.len());
     }
 
-    // Example 4: Restore from backup
-    println!("Example 4: Restoring from backup");
+    // Restore from backup
     {
         let restore_path = temp_dir.join("ngdb_restored");
         let _ = std::fs::remove_dir_all(&restore_path);
@@ -142,13 +133,11 @@ fn main() -> Result<()> {
             .open()?;
 
         print_counts(&restored_db)?;
-        println!("Restore completed\n");
 
         let _ = std::fs::remove_dir_all(&restore_path);
     }
 
-    // Example 5: Backup validation
-    println!("Example 5: Backup verification");
+    // Backup verification
     {
         let restore_path = temp_dir.join("ngdb_verified");
         let _ = std::fs::remove_dir_all(&restore_path);
@@ -175,7 +164,6 @@ fn main() -> Result<()> {
         let _ = std::fs::remove_dir_all(&restore_path);
     }
 
-    // Cleanup
     let _ = std::fs::remove_dir_all(&db_path);
     let _ = std::fs::remove_dir_all(&backup_path);
 

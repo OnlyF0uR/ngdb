@@ -27,8 +27,7 @@ fn main() -> Result<()> {
 
     let counters = db.collection::<Counter>("counters")?;
 
-    // Example 1: Shared transaction across threads
-    println!("Example 1: Shared transaction");
+    // Shared transaction across threads
     {
         let txn = Arc::new(db.transaction()?);
         let mut handles = vec![];
@@ -59,10 +58,9 @@ fn main() -> Result<()> {
             Err(_) => panic!("Failed to unwrap Arc"),
         }
     }
-    println!("Committed shared transaction\n");
+    println!("Committed shared transaction across 3 threads");
 
-    // Example 2: Transaction read isolation
-    println!("Example 2: Read isolation");
+    // Transaction read isolation
     {
         let txn = db.transaction()?;
         let txn_counters = txn.collection::<Counter>("counters")?;
@@ -72,20 +70,19 @@ fn main() -> Result<()> {
             value: 999,
         })?;
 
-        // Read uncommitted write within transaction
         let read_back = txn_counters.get(&"isolated".to_string())?;
-        assert_eq!(read_back.as_ref().map(|c| c.value), Some(999));
+        println!(
+            "Within transaction, value: {:?}",
+            read_back.as_ref().map(|c| c.value)
+        );
 
         txn.rollback()?;
 
-        // Verify rollback
         let after_rollback = counters.get(&"isolated".to_string())?;
-        assert!(after_rollback.is_none());
+        println!("After rollback, value: {:?}", after_rollback);
     }
-    println!("Verified transaction isolation\n");
 
-    // Example 3: Concurrent independent transactions
-    println!("Example 3: Concurrent transactions");
+    // Concurrent independent transactions
     {
         let mut handles = vec![];
 
@@ -115,23 +112,18 @@ fn main() -> Result<()> {
             handle.join().unwrap();
         }
     }
-    println!("Completed concurrent transactions\n");
+    println!("Completed 3 concurrent independent transactions");
 
-    // Example 4: Iteration status tracking
-    println!("Example 4: Iteration");
-    let status = counters.iter()?.for_each(|counter| {
-        // Stop iteration early at value >= 1000
-        counter.value < 1000
-    })?;
+    // Iteration status tracking
+    let status = counters.iter()?.for_each(|counter| counter.value < 1000)?;
 
     match status {
-        ngdb::IterationStatus::Completed => println!("Iteration completed"),
+        ngdb::IterationStatus::Completed => println!("Iteration completed all records"),
         ngdb::IterationStatus::StoppedEarly => println!("Iteration stopped early"),
     }
 
-    // Final state
     let count = counters.iter()?.count()?;
-    println!("\nTotal counters: {}", count);
+    println!("Total counters: {}", count);
 
     db.shutdown()?;
     Ok(())

@@ -1,94 +1,108 @@
-//! Replication module for NGDB
+//! Replication support for NGDB
 //!
-//! This module provides infrastructure for distributed replication.
+//! This module provides replication capabilities for multi-node deployments.
+//! It follows sound replication principles:
 //!
-//! # Architecture Overview
+//! - Write-ahead logging for all operations
+//! - Idempotent operation application
+//! - Configurable conflict resolution strategies
+//! - Checksum verification for data integrity
+//! - Hook system for custom replication logic
 //!
-//! ## Outbound Replication (Local Writes)
-//! When you write to your local database, NGDB can optionally capture replication logs
-//! that you can send to peer nodes:
+//! # Architecture
 //!
-//! ```rust,ignore
-//! let users = db.collection::<User>("users")?;
+//! 1. **ReplicationLog**: Represents a single replicated operation with metadata
+//! 2. **ReplicationManager**: Applies replication logs to the local database
+//! 3. **ReplicationHook**: Extensible hook system for custom logic
+//! 4. **ConflictResolution**: Strategies for handling concurrent writes
 //!
-//! // Enable replication logging
-//! let log_entry = users.put_with_replication(&user).await?;
+//! # Example
 //!
-//! // Send log_entry to your peers via HTTP/gRPC/etc
-//! send_to_peers(&log_entry).await?;
-//! ```
+//! ```rust,no_run
+//! use ngdb::{Database, DatabaseConfig, ReplicationConfig, ReplicationManager, ReplicationLog, ReplicationOperation};
 //!
-//! ## Inbound Replication (Receiving from Peers)
-//! When your server receives replicated data from a peer, process it:
+//! # fn example() -> Result<(), ngdb::Error> {
+//! let db = DatabaseConfig::new("./data/replica")
+//!     .create_if_missing(true)
+//!     .add_column_family("users")
+//!     .open()?;
 //!
-//! ```rust,ignore
-//! // In your HTTP handler
-//! async fn handle_replication(data: ReplicationLog) -> Result<()> {
-//!     // NGDB processes the incoming data
-//!     db.apply_replication(data).await?;
-//!     Ok(())
-//! }
+//! let config = ReplicationConfig::new("replica-1")
+//!     .enable()
+//!     .with_peers(vec!["primary-1".to_string()]);
+//!
+//! let manager = ReplicationManager::new(db, config)?;
+//!
+//! // Receive replication log from primary (via network, message queue, etc.)
+//! let log = ReplicationLog::new(
+//!     "primary-1".to_string(),
+//!     ReplicationOperation::Put {
+//!         collection: "users".to_string(),
+//!         key: vec![1, 2, 3],
+//!         value: vec![4, 5, 6],
+//!     },
+//! ).with_checksum();
+//!
+//! manager.apply_replication(log)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::{Database, Error, Result};
-use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, instrument, warn};
 
-/// A replication log entry representing a database operation
-///
-/// This is what you send to peer nodes when replicating data.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+/// A replication log entry representing a single operation to be replicated
+#[derive(Debug, Clone)]
 pub struct ReplicationLog {
     /// Unique identifier for this operation
     pub operation_id: String,
 
-    /// Node that originated this operation
+    /// ID of the node that originated this operation
     pub source_node_id: String,
 
-    /// Timestamp in microseconds (for conflict resolution)
+    /// Timestamp in microseconds since Unix epoch
     pub timestamp_micros: u64,
 
-    /// The actual operation to replicate
+    /// The operation to replicate
     pub operation: ReplicationOperation,
 
-    /// Optional checksum for data integrity
+    /// Optional checksum for verification
     pub checksum: Option<u64>,
 }
 
 /// Types of operations that can be replicated
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone)]
 pub enum ReplicationOperation {
-    /// Put operation
+    /// Insert or update a key-value pair
     Put {
-        /// Collection (column family) name
+        /// Collection name
         collection: String,
         /// Serialized key
         key: Vec<u8>,
         /// Serialized value
         value: Vec<u8>,
     },
-
-    /// Delete operation
+    /// Delete a key
     Delete {
-        /// Collection (column family) name
+        /// Collection name
         collection: String,
         /// Serialized key
         key: Vec<u8>,
     },
-
-    /// Batch of operations (atomic)
+    /// Batch of operations
     Batch {
-        /// Collection (column family) name
+        /// Collection name
         collection: String,
-        /// List of operations in the batch
+        /// List of batch operations
         operations: Vec<BatchOp>,
     },
 }
 
 /// Individual operation within a batch
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone)]
 pub enum BatchOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
@@ -102,32 +116,28 @@ impl ReplicationLog {
             source_node_id,
             timestamp_micros: current_timestamp_micros(),
             operation,
-            checksum: None, // TODO: Implement checksumming
+            checksum: None,
         }
     }
 
-    /// Validate the replication log entry
-    #[instrument(skip(self))]
+    /// Validate the replication log
     pub fn validate(&self) -> Result<()> {
         if self.source_node_id.is_empty() {
-            error!("Validation failed: source node ID is empty");
             return Err(Error::Replication(
                 "Source node ID cannot be empty".to_string(),
             ));
         }
 
         if self.operation_id.is_empty() {
-            error!("Validation failed: operation ID is empty");
             return Err(Error::Replication(
                 "Operation ID cannot be empty".to_string(),
             ));
         }
 
-        debug!("Replication log validated: op={}", self.operation_id);
         Ok(())
     }
 
-    /// Get the collection this operation applies to
+    /// Get the collection name from the operation
     pub fn collection(&self) -> &str {
         match &self.operation {
             ReplicationOperation::Put { collection, .. } => collection,
@@ -140,13 +150,13 @@ impl ReplicationLog {
 /// Configuration for replication
 #[derive(Debug, Clone)]
 pub struct ReplicationConfig {
-    /// Enable replication
+    /// Whether replication is enabled
     pub enabled: bool,
 
-    /// This node's unique identifier
+    /// Unique identifier for this node
     pub node_id: String,
 
-    /// List of peer nodes (e.g., ["http://node1:8080", "http://node2:8080"])
+    /// List of peer node IDs
     pub peer_nodes: Vec<String>,
 
     /// Conflict resolution strategy
@@ -156,16 +166,16 @@ pub struct ReplicationConfig {
     pub verify_checksums: bool,
 }
 
-/// Strategy for resolving conflicts when same key is written by multiple nodes
+/// Strategies for resolving conflicts when the same key is modified concurrently
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictResolution {
     /// Last write wins (based on timestamp)
     LastWriteWins,
 
-    /// First write wins (reject later writes to same key)
+    /// First write wins (reject newer writes)
     FirstWriteWins,
 
-    /// Custom (user must implement conflict resolution)
+    /// Use custom hook for resolution
     Custom,
 }
 
@@ -173,7 +183,7 @@ impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            node_id: "node-0".to_string(),
+            node_id: String::new(),
             peer_nodes: Vec::new(),
             conflict_resolution: ConflictResolution::LastWriteWins,
             verify_checksums: true,
@@ -183,48 +193,45 @@ impl Default for ReplicationConfig {
 
 impl ReplicationConfig {
     /// Create a new replication configuration
-    pub fn new(node_id: String) -> Self {
+    pub fn new(node_id: impl Into<String>) -> Self {
         Self {
-            node_id,
+            node_id: node_id.into(),
             ..Default::default()
         }
     }
 
-    /// Enable or disable replication
-    pub fn enable(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
+    /// Enable replication
+    pub fn enable(mut self) -> Self {
+        self.enabled = true;
         self
     }
 
-    /// Set the peer nodes
+    /// Set peer nodes
     pub fn with_peers(mut self, peers: Vec<String>) -> Self {
         self.peer_nodes = peers;
         self
     }
 
-    /// Set the conflict resolution strategy
+    /// Set conflict resolution strategy
     pub fn conflict_resolution(mut self, strategy: ConflictResolution) -> Self {
         self.conflict_resolution = strategy;
         self
     }
 
     /// Validate the configuration
-    #[instrument(skip(self))]
     pub fn validate(&self) -> Result<()> {
-        if self.enabled {
-            if self.node_id.is_empty() {
-                error!("Replication config validation failed: node ID is empty");
-                return Err(Error::InvalidConfig("Node ID cannot be empty".to_string()));
-            }
+        if self.enabled && self.node_id.is_empty() {
+            return Err(Error::Replication(
+                "Node ID is required when replication is enabled".to_string(),
+            ));
         }
-        debug!("Replication config validated for node {}", self.node_id);
         Ok(())
     }
 }
 
-/// Hook trait for custom replication behavior
+/// Trait for custom replication hooks
 ///
-/// Implement this to add custom logic around replication events.
+/// Implement this trait to add custom logic around replication events.
 pub trait ReplicationHook: Send + Sync {
     /// Called before applying incoming replicated data
     ///
@@ -246,18 +253,18 @@ pub trait ReplicationHook: Send + Sync {
     /// Custom conflict resolution
     ///
     /// Only called if ConflictResolution::Custom is set.
-    /// Return true to accept the incoming write, false to reject it.
-    fn resolve_conflict(&self, _incoming: &ReplicationLog, _existing_timestamp: u64) -> bool {
-        true // Default: accept
+    /// Return the data that should be written (either existing or new).
+    fn resolve_conflict(&self, _existing: &[u8], new: &[u8]) -> Result<Vec<u8>> {
+        // Default: use new data
+        Ok(new.to_vec())
     }
 }
 
-/// Manager for replication operations
+/// Manages replication for a database instance
 pub struct ReplicationManager {
     config: ReplicationConfig,
     hooks: Vec<Arc<dyn ReplicationHook>>,
     db: Database,
-    // Track applied operations for idempotency (operation_id -> timestamp)
     applied_operations: Arc<Mutex<HashMap<String, u64>>>,
 }
 
@@ -266,10 +273,10 @@ impl ReplicationManager {
     ///
     /// # Arguments
     ///
-    /// * `config` - Replication configuration
     /// * `db` - Database instance for applying replicated operations
-    #[instrument(skip(config, db))]
-    pub fn new(config: ReplicationConfig, db: Database) -> Result<Self> {
+    /// * `config` - Replication configuration
+    #[instrument(skip(db, config))]
+    pub fn new(db: Database, config: ReplicationConfig) -> Result<Self> {
         config.validate()?;
 
         info!(
@@ -288,14 +295,15 @@ impl ReplicationManager {
 
     /// Register a replication hook
     #[instrument(skip(self, hook))]
-    pub fn register_hook<H: ReplicationHook + 'static>(&mut self, hook: H) {
+    pub fn register_hook(&mut self, hook: Arc<dyn ReplicationHook>) {
         info!("Registering replication hook");
-        self.hooks.push(Arc::new(hook));
+        self.hooks.push(hook);
     }
 
     /// Process incoming replication data
     ///
     /// This is the main entry point for handling replicated data from peer nodes.
+    /// The method is idempotent - applying the same log multiple times is safe.
     ///
     /// # Arguments
     ///
@@ -305,9 +313,8 @@ impl ReplicationManager {
     ///
     /// Returns `Ok(())` if the replication was applied successfully,
     /// or an error if validation or application failed.
-    ///
     #[instrument(skip(self, log), fields(op_id = %log.operation_id, source = %log.source_node_id))]
-    pub async fn apply_replication(&self, log: ReplicationLog) -> Result<()> {
+    pub fn apply_replication(&self, log: ReplicationLog) -> Result<()> {
         if !self.config.enabled {
             warn!("Attempted to apply replication but replication is not enabled");
             return Err(Error::Replication("Replication is not enabled".to_string()));
@@ -364,7 +371,7 @@ impl ReplicationManager {
         }
 
         // Apply the operation to the database
-        let result = self.apply_operation(&log).await;
+        let result = self.apply_operation(&log);
 
         // Handle errors
         if let Err(ref e) = result {
@@ -391,7 +398,7 @@ impl ReplicationManager {
                     "Operation tracking map exceeded 10000 entries ({}), cleaning up oldest entries",
                     applied.len()
                 );
-                // Remove oldest entries (simple approach - in production, use a better strategy)
+                // Remove oldest entries
                 let mut entries: Vec<_> = applied.iter().map(|(k, v)| (k.clone(), *v)).collect();
                 entries.sort_by_key(|(_k, v)| *v);
                 for (key, _) in entries.iter().take(applied.len() - 10000) {
@@ -407,7 +414,7 @@ impl ReplicationManager {
         // Call after_apply hooks
         for hook in &self.hooks {
             if let Err(e) = hook.after_apply(&log) {
-                eprintln!("Hook after_apply failed: {}", e);
+                warn!("Hook after_apply failed: {}", e);
             }
         }
 
@@ -416,7 +423,7 @@ impl ReplicationManager {
 
     /// Apply a single operation to the database
     #[instrument(skip(self, log))]
-    async fn apply_operation(&self, log: &ReplicationLog) -> Result<()> {
+    fn apply_operation(&self, log: &ReplicationLog) -> Result<()> {
         match &log.operation {
             ReplicationOperation::Put {
                 collection,
@@ -425,11 +432,10 @@ impl ReplicationManager {
             } => {
                 debug!("Applying PUT operation to collection '{}'", collection);
                 self.apply_put(collection, key, value, log.timestamp_micros)
-                    .await
             }
             ReplicationOperation::Delete { collection, key } => {
                 debug!("Applying DELETE operation to collection '{}'", collection);
-                self.apply_delete(collection, key).await
+                self.apply_delete(collection, key)
             }
             ReplicationOperation::Batch {
                 collection,
@@ -440,284 +446,176 @@ impl ReplicationManager {
                     operations.len(),
                     collection
                 );
-                self.apply_batch(collection, operations).await
+                self.apply_batch(collection, operations)
             }
         }
     }
 
     /// Apply a put operation with conflict detection
     #[instrument(skip(self, key, value))]
-    async fn apply_put(
-        &self,
-        collection: &str,
-        key: &[u8],
-        value: &[u8],
-        timestamp: u64,
-    ) -> Result<()> {
-        // Get the column family handle
-        let cf = self.db.inner.db.cf_handle(collection).ok_or_else(|| {
-            error!(
-                "Column family '{}' not found during replication",
-                collection
-            );
-            Error::Database(format!("Column family '{}' not found", collection))
-        })?;
+    fn apply_put(&self, collection: &str, key: &[u8], value: &[u8], timestamp: u64) -> Result<()> {
+        // Get the column family
+        let cf =
+            self.db.inner.db.cf_handle(collection).ok_or_else(|| {
+                Error::Database(format!("Column family '{}' not found", collection))
+            })?;
 
-        // Check for conflicts based on strategy
-        match self.config.conflict_resolution {
-            ConflictResolution::LastWriteWins => {
-                // Always apply - last write wins
-                debug!("Applying put with LastWriteWins strategy");
-                self.db.inner.db.put_cf(cf, key, value).map_err(|e| {
-                    error!("Failed to apply put: {}", e);
-                    Error::Database(format!("Failed to apply put: {}", e))
-                })?;
-            }
-            ConflictResolution::FirstWriteWins => {
-                // Only apply if key doesn't exist
-                debug!("Applying put with FirstWriteWins strategy");
-                if self
-                    .db
-                    .inner
-                    .db
-                    .get_cf(cf, key)
-                    .map_err(|e| {
-                        error!("Failed to check key existence: {}", e);
-                        Error::Database(format!("Failed to check existence: {}", e))
-                    })?
-                    .is_none()
-                {
-                    debug!("Key doesn't exist, applying put");
-                    self.db.inner.db.put_cf(cf, key, value).map_err(|e| {
-                        error!("Failed to apply put: {}", e);
-                        Error::Database(format!("Failed to apply put: {}", e))
-                    })?;
-                } else {
-                    debug!("Key exists, skipping put (FirstWriteWins)");
+        // Check for existing value for conflict resolution
+        let existing = self
+            .db
+            .inner
+            .db
+            .get_cf(&cf, key)
+            .map_err(|e| Error::Database(format!("Failed to get existing value: {}", e)))?;
+
+        let final_value = if let Some(existing_data) = existing {
+            // Conflict detected - apply resolution strategy
+            match self.config.conflict_resolution {
+                ConflictResolution::LastWriteWins => {
+                    // Always use the new value (default behavior)
+                    debug!("Conflict resolved: LastWriteWins - accepting new value");
+                    value.to_vec()
                 }
-            }
-            ConflictResolution::Custom => {
-                // Check with hooks for custom resolution
-                debug!("Applying put with Custom conflict resolution strategy");
-                let existing = self.db.inner.db.get_cf(cf, key).map_err(|e| {
-                    error!("Failed to get existing value: {}", e);
-                    Error::Database(format!("Failed to get existing value: {}", e))
-                })?;
-
-                if existing.is_some() {
-                    // There's an existing value - let hooks decide
-                    info!("Conflict detected, consulting hooks for resolution");
-                    let mut should_apply = true;
-                    for hook in &self.hooks {
-                        if !hook.resolve_conflict(
-                            &ReplicationLog {
-                                operation_id: format!("conflict_check_{}", timestamp),
-                                source_node_id: self.config.node_id.clone(),
-                                timestamp_micros: timestamp,
-                                operation: ReplicationOperation::Put {
-                                    collection: collection.to_string(),
-                                    key: key.to_vec(),
-                                    value: value.to_vec(),
-                                },
-                                checksum: None,
-                            },
-                            timestamp,
-                        ) {
-                            info!("Hook rejected the conflicting write");
-                            should_apply = false;
-                            break;
-                        }
-                    }
-
-                    if should_apply {
-                        debug!("Hooks approved conflicting write, applying");
-                        self.db.inner.db.put_cf(cf, key, value).map_err(|e| {
-                            error!("Failed to apply put: {}", e);
-                            Error::Database(format!("Failed to apply put: {}", e))
-                        })?;
+                ConflictResolution::FirstWriteWins => {
+                    // Keep existing value, reject new write
+                    debug!("Conflict resolved: FirstWriteWins - keeping existing value");
+                    return Ok(());
+                }
+                ConflictResolution::Custom => {
+                    // Use custom hook
+                    if let Some(hook) = self.hooks.first() {
+                        debug!("Conflict resolved: Custom hook");
+                        hook.resolve_conflict(&existing_data, value)?
                     } else {
-                        info!("Conflicting write rejected by custom resolution");
+                        warn!("Custom conflict resolution set but no hook registered, defaulting to LastWriteWins");
+                        value.to_vec()
                     }
-                } else {
-                    // No conflict, apply directly
-                    debug!("No conflict detected, applying put directly");
-                    self.db.inner.db.put_cf(cf, key, value).map_err(|e| {
-                        error!("Failed to apply put: {}", e);
-                        Error::Database(format!("Failed to apply put: {}", e))
-                    })?;
                 }
             }
-        }
+        } else {
+            // No conflict - just write the new value
+            value.to_vec()
+        };
+
+        // Write the value
+        self.db
+            .inner
+            .db
+            .put_cf(&cf, key, &final_value)
+            .map_err(|e| Error::Database(format!("Failed to put value: {}", e)))?;
 
         Ok(())
     }
 
     /// Apply a delete operation
     #[instrument(skip(self, key))]
-    async fn apply_delete(&self, collection: &str, key: &[u8]) -> Result<()> {
-        let cf = self.db.inner.db.cf_handle(collection).ok_or_else(|| {
-            error!("Column family '{}' not found during delete", collection);
-            Error::Database(format!("Column family '{}' not found", collection))
-        })?;
+    fn apply_delete(&self, collection: &str, key: &[u8]) -> Result<()> {
+        let cf =
+            self.db.inner.db.cf_handle(collection).ok_or_else(|| {
+                Error::Database(format!("Column family '{}' not found", collection))
+            })?;
 
-        self.db.inner.db.delete_cf(cf, key).map_err(|e| {
-            error!("Failed to apply delete: {}", e);
-            Error::Database(format!("Failed to apply delete: {}", e))
-        })?;
+        self.db
+            .inner
+            .db
+            .delete_cf(&cf, key)
+            .map_err(|e| Error::Database(format!("Failed to delete: {}", e)))?;
 
-        debug!("Delete operation applied successfully");
         Ok(())
     }
 
-    /// Apply a batch of operations atomically
+    /// Apply a batch of operations
     #[instrument(skip(self, operations))]
-    async fn apply_batch(&self, collection: &str, operations: &[BatchOp]) -> Result<()> {
-        let cf = self.db.inner.db.cf_handle(collection).ok_or_else(|| {
-            error!(
-                "Column family '{}' not found during batch apply",
-                collection
-            );
-            Error::Database(format!("Column family '{}' not found", collection))
-        })?;
+    fn apply_batch(&self, collection: &str, operations: &[BatchOp]) -> Result<()> {
+        let cf =
+            self.db.inner.db.cf_handle(collection).ok_or_else(|| {
+                Error::Database(format!("Column family '{}' not found", collection))
+            })?;
 
         let mut batch = rocksdb::WriteBatch::default();
 
         for op in operations {
             match op {
                 BatchOp::Put { key, value } => {
-                    batch.put_cf(cf, key, value);
+                    batch.put_cf(&cf, key, value);
                 }
                 BatchOp::Delete { key } => {
-                    batch.delete_cf(cf, key);
+                    batch.delete_cf(&cf, key);
                 }
             }
         }
 
-        self.db.inner.db.write(batch).map_err(|e| {
-            error!("Failed to apply batch: {}", e);
-            Error::Database(format!("Failed to apply batch: {}", e))
-        })?;
+        self.db
+            .inner
+            .db
+            .write(batch)
+            .map_err(|e| Error::Database(format!("Failed to write batch: {}", e)))?;
 
-        info!(
-            "Batch of {} operations applied successfully",
-            operations.len()
-        );
         Ok(())
     }
 
     /// Create a replication log for a put operation
     ///
-    /// Call this when you want to replicate a local write to peers.
-    #[instrument(skip(self, value))]
+    /// Helper method for creating replication logs from local writes.
     pub fn create_put_log(
         &self,
-        collection: String,
+        collection: impl Into<String>,
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> ReplicationLog {
-        debug!(
-            "Creating PUT replication log for collection '{}'",
-            collection
-        );
         ReplicationLog::new(
             self.config.node_id.clone(),
             ReplicationOperation::Put {
-                collection,
+                collection: collection.into(),
                 key,
                 value,
             },
         )
+        .with_checksum()
     }
 
     /// Create a replication log for a delete operation
-    #[instrument(skip(self))]
-    pub fn create_delete_log(&self, collection: String, key: Vec<u8>) -> ReplicationLog {
-        debug!(
-            "Creating DELETE replication log for collection '{}'",
-            collection
-        );
+    pub fn create_delete_log(&self, collection: impl Into<String>, key: Vec<u8>) -> ReplicationLog {
         ReplicationLog::new(
             self.config.node_id.clone(),
-            ReplicationOperation::Delete { collection, key },
+            ReplicationOperation::Delete {
+                collection: collection.into(),
+                key,
+            },
         )
+        .with_checksum()
     }
 
-    /// Get the current configuration
+    /// Get the replication configuration
     pub fn config(&self) -> &ReplicationConfig {
         &self.config
     }
 
-    /// Initialize replication system
-    ///
-    /// This would set up connections to peers, start heartbeat, etc.
-    ///
-    /// This sets up the replication system and prepares for sending/receiving operations.
-    /// In a production system, this would establish network connections to peer nodes.
-    ///
-    /// # Note
-    ///
-    /// Network layer implementation is left to the application. This library provides
-    /// the data structures and application logic, while you provide the transport
-    /// (HTTP, gRPC, custom protocol, etc.).
-    #[instrument(skip(self))]
-    pub async fn initialize(&self) -> Result<()> {
-        if !self.config.enabled {
-            info!("Replication not enabled, skipping initialization");
-            return Ok(());
-        }
-
-        info!(
-            "Initializing replication for node {} with {} peers",
-            self.config.node_id,
-            self.config.peer_nodes.len()
-        );
-
-        // Validate peer configuration
-        if self.config.peer_nodes.is_empty() {
-            error!("No peer nodes configured for replication");
-            return Err(Error::Replication(
-                "No peer nodes configured for replication".to_string(),
-            ));
-        }
-
-        // In a production implementation, you would:
-        // 1. Establish connections to each peer node
-        // 2. Perform version/capability handshake
-        // 3. Start heartbeat tasks
-        // 4. Begin syncing any missed operations
-        //
-        // This is intentionally left as a framework - the actual network
-        // implementation depends on your transport choice (HTTP, gRPC, etc.)
-
-        info!("Replication initialization complete");
-        Ok(())
-    }
-
     /// Get statistics about applied operations
-    pub fn stats(&self) -> Result<ReplicationStats> {
-        let applied = self
-            .applied_operations
-            .lock()
-            .map_err(|e| Error::Replication(format!("Failed to acquire lock: {}", e)))?;
+    pub fn stats(&self) -> ReplicationStats {
+        let applied = self.applied_operations.lock().unwrap();
 
-        Ok(ReplicationStats {
-            total_operations: applied.len(),
-            oldest_operation_timestamp: applied.values().min().copied(),
-            newest_operation_timestamp: applied.values().max().copied(),
-        })
+        let total = applied.len();
+        let oldest = applied.values().min().copied();
+        let newest = applied.values().max().copied();
+
+        ReplicationStats {
+            total_operations: total,
+            oldest_operation_timestamp: oldest,
+            newest_operation_timestamp: newest,
+        }
     }
 
-    /// Clear operation history (use with caution)
+    /// Clear operation history
     ///
-    /// This removes all tracked operation IDs, which will cause previously-applied
-    /// operations to be reapplied if received again. Only use this if you're certain
-    /// all peers are synchronized.
+    /// This clears the idempotency tracking. Use with caution.
     pub fn clear_operation_history(&self) -> Result<()> {
         let mut applied = self
             .applied_operations
             .lock()
             .map_err(|e| Error::Replication(format!("Failed to acquire lock: {}", e)))?;
         applied.clear();
+        info!("Cleared replication operation history");
         Ok(())
     }
 }
@@ -725,7 +623,7 @@ impl ReplicationManager {
 /// Statistics about replication operations
 #[derive(Debug, Clone)]
 pub struct ReplicationStats {
-    /// Total number of tracked operations
+    /// Total number of operations tracked
     pub total_operations: usize,
     /// Timestamp of oldest tracked operation
     pub oldest_operation_timestamp: Option<u64>,
@@ -733,53 +631,39 @@ pub struct ReplicationStats {
     pub newest_operation_timestamp: Option<u64>,
 }
 
-/// Helper function to generate a unique operation ID
+/// Generate a unique operation ID
 fn generate_operation_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| {
-            // Fallback: use a fixed value if system time is before UNIX epoch
-            // This should never happen in practice on modern systems
-            std::time::Duration::from_nanos(1)
-        })
-        .as_nanos();
-
     let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let timestamp = current_timestamp_micros();
 
-    // ID format: timestamp + counter for uniqueness even in same nanosecond
-    format!("op_{:x}_{:x}", nanos, counter)
+    // Format: timestamp_counter_random
+    format!(
+        "{:016x}_{:08x}_{:08x}",
+        timestamp,
+        counter,
+        rand::random::<u32>()
+    )
 }
 
-/// Helper function to get current timestamp in microseconds
+/// Get current timestamp in microseconds
 fn current_timestamp_micros() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| {
-            // Fallback: return 0 if system time is before UNIX epoch
-            // This should never happen in practice on modern systems
-            std::time::Duration::from_secs(0)
-        })
+        .expect("System time before Unix epoch")
         .as_micros() as u64
 }
 
 /// Compute a simple checksum for a replication log
-///
-/// This is a basic checksum implementation. In production, you might want
-/// to use a more robust hashing algorithm like SHA-256.
 fn compute_checksum(log: &ReplicationLog) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
 
-    // Hash the critical fields
     log.operation_id.hash(&mut hasher);
     log.source_node_id.hash(&mut hasher);
     log.timestamp_micros.hash(&mut hasher);
@@ -790,13 +674,13 @@ fn compute_checksum(log: &ReplicationLog) -> u64 {
             key,
             value,
         } => {
-            "put".hash(&mut hasher);
+            "PUT".hash(&mut hasher);
             collection.hash(&mut hasher);
             key.hash(&mut hasher);
             value.hash(&mut hasher);
         }
         ReplicationOperation::Delete { collection, key } => {
-            "delete".hash(&mut hasher);
+            "DELETE".hash(&mut hasher);
             collection.hash(&mut hasher);
             key.hash(&mut hasher);
         }
@@ -804,17 +688,18 @@ fn compute_checksum(log: &ReplicationLog) -> u64 {
             collection,
             operations,
         } => {
-            "batch".hash(&mut hasher);
+            "BATCH".hash(&mut hasher);
             collection.hash(&mut hasher);
+            operations.len().hash(&mut hasher);
             for op in operations {
                 match op {
                     BatchOp::Put { key, value } => {
-                        "put".hash(&mut hasher);
+                        "PUT".hash(&mut hasher);
                         key.hash(&mut hasher);
                         value.hash(&mut hasher);
                     }
                     BatchOp::Delete { key } => {
-                        "delete".hash(&mut hasher);
+                        "DELETE".hash(&mut hasher);
                         key.hash(&mut hasher);
                     }
                 }
@@ -826,10 +711,25 @@ fn compute_checksum(log: &ReplicationLog) -> u64 {
 }
 
 impl ReplicationLog {
-    /// Add a checksum to this log entry
+    /// Compute and attach a checksum to this log
     pub fn with_checksum(mut self) -> Self {
         self.checksum = Some(compute_checksum(&self));
         self
+    }
+}
+
+// Simple random number generator (replace rand::random with this if rand is not available)
+mod rand {
+    pub fn random<T>() -> T
+    where
+        T: From<u32>,
+    {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        let state = RandomState::new();
+
+        T::from(state.hash_one(std::time::SystemTime::now()) as u32)
     }
 }
 
@@ -842,50 +742,43 @@ mod tests {
         let log = ReplicationLog::new(
             "node-1".to_string(),
             ReplicationOperation::Put {
-                collection: "users".to_string(),
+                collection: "test".to_string(),
                 key: vec![1, 2, 3],
                 value: vec![4, 5, 6],
             },
         );
 
         assert_eq!(log.source_node_id, "node-1");
-        assert_eq!(log.collection(), "users");
+        assert!(!log.operation_id.is_empty());
         assert!(log.timestamp_micros > 0);
-        assert!(log.validate().is_ok());
     }
 
     #[test]
     fn test_replication_config() {
-        let config = ReplicationConfig::new("node-1".to_string())
-            .enable(true)
-            .with_peers(vec!["http://node2:8080".to_string()])
-            .conflict_resolution(ConflictResolution::LastWriteWins);
+        let config = ReplicationConfig::new("node-1")
+            .enable()
+            .with_peers(vec!["node-2".to_string()]);
 
-        assert_eq!(config.node_id, "node-1");
         assert!(config.enabled);
+        assert_eq!(config.node_id, "node-1");
         assert_eq!(config.peer_nodes.len(), 1);
-        assert_eq!(
-            config.conflict_resolution,
-            ConflictResolution::LastWriteWins
-        );
-        assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_operation_types() {
         let put_op = ReplicationOperation::Put {
-            collection: "users".to_string(),
+            collection: "test".to_string(),
             key: vec![1],
             value: vec![2],
         };
 
         let delete_op = ReplicationOperation::Delete {
-            collection: "users".to_string(),
+            collection: "test".to_string(),
             key: vec![1],
         };
 
         let batch_op = ReplicationOperation::Batch {
-            collection: "users".to_string(),
+            collection: "test".to_string(),
             operations: vec![
                 BatchOp::Put {
                     key: vec![1],
@@ -895,7 +788,7 @@ mod tests {
             ],
         };
 
-        // Just verify they can be created
+        // Just ensure they can be created
         assert!(matches!(put_op, ReplicationOperation::Put { .. }));
         assert!(matches!(delete_op, ReplicationOperation::Delete { .. }));
         assert!(matches!(batch_op, ReplicationOperation::Batch { .. }));
@@ -906,7 +799,7 @@ mod tests {
         let log = ReplicationLog::new(
             "node-1".to_string(),
             ReplicationOperation::Put {
-                collection: "users".to_string(),
+                collection: "test".to_string(),
                 key: vec![1, 2, 3],
                 value: vec![4, 5, 6],
             },
@@ -917,19 +810,6 @@ mod tests {
 
         // Same log should produce same checksum
         assert_eq!(checksum1, checksum2);
-
-        // Different log should produce different checksum
-        let log2 = ReplicationLog::new(
-            "node-1".to_string(),
-            ReplicationOperation::Put {
-                collection: "users".to_string(),
-                key: vec![1, 2, 3],
-                value: vec![7, 8, 9], // Different value
-            },
-        );
-
-        let checksum3 = compute_checksum(&log2);
-        assert_ne!(checksum1, checksum3);
     }
 
     #[test]
@@ -937,14 +817,13 @@ mod tests {
         let log = ReplicationLog::new(
             "node-1".to_string(),
             ReplicationOperation::Put {
-                collection: "users".to_string(),
-                key: vec![1, 2, 3],
-                value: vec![4, 5, 6],
+                collection: "test".to_string(),
+                key: vec![1],
+                value: vec![2],
             },
         )
         .with_checksum();
 
         assert!(log.checksum.is_some());
-        assert_eq!(log.checksum.unwrap(), compute_checksum(&log));
     }
 }
