@@ -407,9 +407,9 @@ fn main() -> Result<()> {
 
         // Replication statistics
         {
-            let stats1 = manager1.stats();
-            let stats2 = manager2.stats();
-            let stats3 = manager3.stats();
+            let stats1 = manager1.stats().unwrap();
+            let stats2 = manager2.stats().unwrap();
+            let stats3 = manager3.stats().unwrap();
 
             println!("Node 1: {} operations applied", stats1.total_operations);
             println!("Node 2: {} operations applied", stats2.total_operations);

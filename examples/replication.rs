@@ -227,7 +227,7 @@ fn main() -> Result<()> {
 
     // Replication statistics
     {
-        let stats = replica_manager.stats();
+        let stats = replica_manager.stats().unwrap();
         println!("Total operations applied: {}", stats.total_operations);
         if let Some(oldest) = stats.oldest_operation_timestamp {
             println!("Oldest operation timestamp: {} us", oldest);

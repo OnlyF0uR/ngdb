@@ -12,6 +12,7 @@ categories = ["database"]
 [dependencies]
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "multi-threaded-cf"] }
 borsh = { version = "1.5", features = ["derive"] }
+blake3 = "1.8"
 tracing = "0.1"
 
 [target.'cfg(not(windows))'.dependencies.rocksdb]

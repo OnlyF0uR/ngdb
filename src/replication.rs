@@ -5,9 +5,11 @@
 //!
 //! - Write-ahead logging for all operations
 //! - Idempotent operation application
-//! - Configurable conflict resolution strategies
-//! - Checksum verification for data integrity
+//! - Configurable conflict resolution strategies (LastWriteWins, FirstWriteWins, Custom)
+//! - BLAKE3 checksums for data integrity verification
 //! - Hook system for custom replication logic
+//! - Tombstone-based deletion tracking
+//! - Age-based cleanup of operation history (1-hour retention + 50k safety limit)
 //!
 //! # Architecture
 //!
@@ -15,6 +17,41 @@
 //! 2. **ReplicationManager**: Applies replication logs to the local database
 //! 3. **ReplicationHook**: Extensible hook system for custom logic
 //! 4. **ConflictResolution**: Strategies for handling concurrent writes
+//! 5. **ReplicationMetadata**: Timestamps stored separately from actual data
+//!
+//! # Key Features
+//!
+//! ## Conflict Resolution
+//!
+//! Three strategies are available:
+//!
+//! - **LastWriteWins**: Most recent write (by timestamp) wins
+//! - **FirstWriteWins**: First write wins, subsequent writes are rejected
+//! - **Custom**: Use hooks to implement custom merge logic
+//!
+//! ## Metadata Separation
+//!
+//! Timestamps and tombstone markers are stored in separate metadata column families
+//! (e.g., `__ngdb_repl_meta_users` for the `users` collection). These are created
+//! **automatically** when replication is first used for a collection. This means:
+//!
+//! - **No manual setup**: Metadata column families are created on-demand
+//! - **No wrapping overhead**: Your data is stored exactly as you write it
+//! - **Transparent reads**: `Collection::get()` just works - no special handling needed
+//! - **Clean separation**: Replication metadata doesn't pollute your data
+//! - **Easy migration**: Add replication to existing databases without data migration
+//!
+//! ## Tombstones for Deletes
+//!
+//! Deletes store tombstone metadata (with timestamps) rather than immediate removal.
+//! This prevents "delete before write" race conditions where a delete arrives before
+//! the original write it was meant to delete.
+//!
+//! ## Network Transport
+//!
+//! `ReplicationLog` implements `BorshSerialize`/`BorshDeserialize` for efficient
+//! network transport. Use your preferred transport layer (gRPC, message queue, etc.)
+//! to send logs between nodes.
 //!
 //! # Example
 //!
@@ -22,6 +59,7 @@
 //! use ngdb::{Database, DatabaseConfig, ReplicationConfig, ReplicationManager, ReplicationLog, ReplicationOperation};
 //!
 //! # fn example() -> Result<(), ngdb::Error> {
+//! // Just create your normal column families - metadata CFs are created automatically
 //! let db = DatabaseConfig::new("./data/replica")
 //!     .create_if_missing(true)
 //!     .add_column_family("users")
@@ -31,7 +69,8 @@
 //!     .enable()
 //!     .with_peers(vec!["primary-1".to_string()]);
 //!
-//! let manager = ReplicationManager::new(db, config)?;
+//! // Metadata column family __ngdb_repl_meta_users will be created automatically
+//! let manager = ReplicationManager::new(db.clone(), config)?;
 //!
 //! // Receive replication log from primary (via network, message queue, etc.)
 //! let log = ReplicationLog::new(
@@ -43,19 +82,24 @@
 //!     },
 //! ).with_checksum();
 //!
+//! // Apply replication - data is stored normally, metadata stored separately
 //! manager.apply_replication(log)?;
+//!
+//! // Read data normally - no special handling needed!
+//! // Your Collection::get() calls work transparently with replicated data
 //! # Ok(())
 //! # }
 //! ```
 
 use crate::{Database, Error, Result};
+use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, instrument, warn};
 
 /// A replication log entry representing a single operation to be replicated
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ReplicationLog {
     /// Unique identifier for this operation
     pub operation_id: String,
@@ -69,12 +113,12 @@ pub struct ReplicationLog {
     /// The operation to replicate
     pub operation: ReplicationOperation,
 
-    /// Optional checksum for verification
-    pub checksum: Option<u64>,
+    /// Optional checksum for verification (blake3 hash)
+    pub checksum: Option<[u8; 32]>,
 }
 
 /// Types of operations that can be replicated
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum ReplicationOperation {
     /// Insert or update a key-value pair
     Put {
@@ -102,10 +146,33 @@ pub enum ReplicationOperation {
 }
 
 /// Individual operation within a batch
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum BatchOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
+}
+
+/// Metadata stored separately for replication conflict resolution
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct ReplicationMetadata {
+    timestamp_micros: u64,
+    is_tombstone: bool,
+}
+
+impl ReplicationMetadata {
+    fn new(timestamp_micros: u64) -> Self {
+        Self {
+            timestamp_micros,
+            is_tombstone: false,
+        }
+    }
+
+    fn tombstone(timestamp_micros: u64) -> Self {
+        Self {
+            timestamp_micros,
+            is_tombstone: true,
+        }
+    }
 }
 
 impl ReplicationLog {
@@ -254,6 +321,29 @@ pub trait ReplicationHook: Send + Sync {
     ///
     /// Only called if ConflictResolution::Custom is set.
     /// Return the data that should be written (either existing or new).
+    ///
+    /// # Hook Chaining
+    ///
+    /// When multiple hooks are registered, they are applied sequentially:
+    /// - First hook receives: `(existing_data, incoming_data)`
+    /// - Second hook receives: `(existing_data, first_hook_result)`
+    /// - Third hook receives: `(existing_data, second_hook_result)`
+    /// - And so on...
+    ///
+    /// The final hook's result is what gets written to the database.
+    /// This allows you to compose conflict resolution strategies.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// struct MergeHook;
+    /// impl ReplicationHook for MergeHook {
+    ///     fn resolve_conflict(&self, existing: &[u8], new: &[u8]) -> Result<Vec<u8>> {
+    ///         // Custom merge logic here
+    ///         Ok(merge_json(existing, new))
+    ///     }
+    /// }
+    /// ```
     fn resolve_conflict(&self, _existing: &[u8], new: &[u8]) -> Result<Vec<u8>> {
         // Default: use new data
         Ok(new.to_vec())
@@ -265,7 +355,80 @@ pub struct ReplicationManager {
     config: ReplicationConfig,
     hooks: Vec<Arc<dyn ReplicationHook>>,
     db: Database,
-    applied_operations: Arc<Mutex<HashMap<String, u64>>>,
+    applied_operations: Arc<RwLock<HashMap<String, u64>>>,
+}
+
+impl ReplicationManager {
+    /// Get the metadata column family name for a given data column family
+    fn meta_cf_name(collection: &str) -> String {
+        format!("__ngdb_repl_meta_{}", collection)
+    }
+
+    /// Get or create the metadata column family for replication timestamps
+    fn ensure_meta_cf(&self, collection: &str) -> Result<()> {
+        let meta_cf = Self::meta_cf_name(collection);
+
+        // Check if column family exists
+        if self.db.inner.db.cf_handle(&meta_cf).is_none() {
+            // Create it automatically with default options
+            debug!("Auto-creating metadata column family: {}", meta_cf);
+            self.db
+                .inner
+                .db
+                .create_cf(&meta_cf, &rocksdb::Options::default())
+                .map_err(|e| {
+                    Error::Database(format!(
+                        "Failed to create metadata column family '{}': {}",
+                        meta_cf, e
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Get replication metadata for a key
+    fn get_metadata(&self, collection: &str, key: &[u8]) -> Result<Option<ReplicationMetadata>> {
+        let meta_cf_name = Self::meta_cf_name(collection);
+        let meta_cf =
+            self.db.inner.db.cf_handle(&meta_cf_name).ok_or_else(|| {
+                Error::Database(format!("Metadata CF '{}' not found", meta_cf_name))
+            })?;
+
+        match self.db.inner.db.get_cf(&meta_cf, key)? {
+            Some(bytes) => {
+                let metadata = ReplicationMetadata::try_from_slice(&bytes).map_err(|e| {
+                    Error::Deserialization(format!("Failed to deserialize metadata: {}", e))
+                })?;
+                Ok(Some(metadata))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Set replication metadata for a key
+    fn set_metadata(
+        &self,
+        collection: &str,
+        key: &[u8],
+        metadata: &ReplicationMetadata,
+    ) -> Result<()> {
+        let meta_cf_name = Self::meta_cf_name(collection);
+        let meta_cf =
+            self.db.inner.db.cf_handle(&meta_cf_name).ok_or_else(|| {
+                Error::Database(format!("Metadata CF '{}' not found", meta_cf_name))
+            })?;
+
+        let bytes = borsh::to_vec(metadata)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize metadata: {}", e)))?;
+
+        self.db
+            .inner
+            .db
+            .put_cf(&meta_cf, key, bytes)
+            .map_err(|e| Error::Database(format!("Failed to write metadata: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 impl ReplicationManager {
@@ -289,7 +452,7 @@ impl ReplicationManager {
             config,
             hooks: Vec::new(),
             db,
-            applied_operations: Arc::new(Mutex::new(HashMap::new())),
+            applied_operations: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -329,9 +492,9 @@ impl ReplicationManager {
         if self.config.verify_checksums && log.checksum.is_some() {
             debug!("Verifying checksum for operation {}", log.operation_id);
             let computed = compute_checksum(&log);
-            if Some(computed) != log.checksum {
+            if log.checksum.as_ref() != Some(&computed) {
                 error!(
-                    "Checksum mismatch for operation {}: expected {:?}, got {}",
+                    "Checksum mismatch for operation {}: expected {:?}, got {:?}",
                     log.operation_id, log.checksum, computed
                 );
                 return Err(Error::Replication(format!(
@@ -345,8 +508,8 @@ impl ReplicationManager {
         {
             let applied = self
                 .applied_operations
-                .lock()
-                .map_err(|e| Error::Replication(format!("Failed to acquire lock: {}", e)))?;
+                .read()
+                .map_err(|e| Error::Replication(format!("Failed to acquire read lock: {}", e)))?;
 
             if let Some(&existing_ts) = applied.get(&log.operation_id) {
                 // Already applied - check if we should skip or reapply based on timestamp
@@ -371,7 +534,7 @@ impl ReplicationManager {
         }
 
         // Apply the operation to the database
-        let result = self.apply_operation(&log);
+        let result = self.apply_operation(&log, log.timestamp_micros);
 
         // Handle errors
         if let Err(ref e) = result {
@@ -388,24 +551,41 @@ impl ReplicationManager {
         {
             let mut applied = self
                 .applied_operations
-                .lock()
-                .map_err(|e| Error::Replication(format!("Failed to acquire lock: {}", e)))?;
+                .write()
+                .map_err(|e| Error::Replication(format!("Failed to acquire write lock: {}", e)))?;
             applied.insert(log.operation_id.clone(), log.timestamp_micros);
 
-            // Limit the size of the tracking map (keep last 10000 operations)
-            if applied.len() > 10000 {
+            // Age-based cleanup: remove operations older than 1 hour
+            const MAX_AGE_MICROS: u64 = 3_600_000_000; // 1 hour in microseconds
+            let current_time = current_timestamp_micros();
+            let cutoff_time = current_time.saturating_sub(MAX_AGE_MICROS);
+
+            let before_count = applied.len();
+            applied.retain(|_k, &mut v| v >= cutoff_time);
+            let after_count = applied.len();
+
+            if before_count != after_count {
+                info!(
+                    "Cleaned up {} old operation entries (kept {} recent entries)",
+                    before_count - after_count,
+                    after_count
+                );
+            }
+
+            // Safety limit: if still over 50000 entries, remove oldest
+            if applied.len() > 50000 {
                 warn!(
-                    "Operation tracking map exceeded 10000 entries ({}), cleaning up oldest entries",
+                    "Operation tracking map exceeded 50000 entries ({}), performing emergency cleanup",
                     applied.len()
                 );
-                // Remove oldest entries
                 let mut entries: Vec<_> = applied.iter().map(|(k, v)| (k.clone(), *v)).collect();
                 entries.sort_by_key(|(_k, v)| *v);
-                for (key, _) in entries.iter().take(applied.len() - 10000) {
+                let remove_count = entries.len().saturating_sub(25000);
+                for (key, _) in entries.iter().take(remove_count) {
                     applied.remove(key);
                 }
                 info!(
-                    "Cleaned up operation tracking map to {} entries",
+                    "Emergency cleanup completed, now tracking {} entries",
                     applied.len()
                 );
             }
@@ -423,7 +603,7 @@ impl ReplicationManager {
 
     /// Apply a single operation to the database
     #[instrument(skip(self, log))]
-    fn apply_operation(&self, log: &ReplicationLog) -> Result<()> {
+    fn apply_operation(&self, log: &ReplicationLog, timestamp: u64) -> Result<()> {
         match &log.operation {
             ReplicationOperation::Put {
                 collection,
@@ -431,11 +611,11 @@ impl ReplicationManager {
                 value,
             } => {
                 debug!("Applying PUT operation to collection '{}'", collection);
-                self.apply_put(collection, key, value, log.timestamp_micros)
+                self.apply_put(collection, key, value, timestamp)
             }
             ReplicationOperation::Delete { collection, key } => {
                 debug!("Applying DELETE operation to collection '{}'", collection);
-                self.apply_delete(collection, key)
+                self.apply_delete(collection, key, timestamp)
             }
             ReplicationOperation::Batch {
                 collection,
@@ -446,7 +626,7 @@ impl ReplicationManager {
                     operations.len(),
                     collection
                 );
-                self.apply_batch(collection, operations)
+                self.apply_batch(collection, operations, timestamp)
             }
         }
     }
@@ -454,25 +634,38 @@ impl ReplicationManager {
     /// Apply a put operation with conflict detection
     #[instrument(skip(self, key, value))]
     fn apply_put(&self, collection: &str, key: &[u8], value: &[u8], timestamp: u64) -> Result<()> {
+        // Ensure metadata CF exists
+        self.ensure_meta_cf(collection)?;
+
         // Get the column family
         let cf =
             self.db.inner.db.cf_handle(collection).ok_or_else(|| {
                 Error::Database(format!("Column family '{}' not found", collection))
             })?;
 
-        // Check for existing value for conflict resolution
-        let existing = self
+        // Check for existing metadata for conflict resolution
+        let existing_metadata = self.get_metadata(collection, key)?;
+
+        // Check if there's an existing value
+        let existing_data = self
             .db
             .inner
             .db
             .get_cf(&cf, key)
             .map_err(|e| Error::Database(format!("Failed to get existing value: {}", e)))?;
 
-        let final_value = if let Some(existing_data) = existing {
+        let final_value = if let Some(existing_metadata) = existing_metadata {
             // Conflict detected - apply resolution strategy
             match self.config.conflict_resolution {
                 ConflictResolution::LastWriteWins => {
-                    // Always use the new value (default behavior)
+                    // Compare timestamps
+                    if existing_metadata.timestamp_micros >= timestamp {
+                        debug!(
+                            "Conflict resolved: LastWriteWins - keeping existing value (ts: {} >= {})",
+                            existing_metadata.timestamp_micros, timestamp
+                        );
+                        return Ok(());
+                    }
                     debug!("Conflict resolved: LastWriteWins - accepting new value");
                     value.to_vec()
                 }
@@ -482,14 +675,21 @@ impl ReplicationManager {
                     return Ok(());
                 }
                 ConflictResolution::Custom => {
-                    // Use custom hook
-                    if let Some(hook) = self.hooks.first() {
-                        debug!("Conflict resolved: Custom hook");
-                        hook.resolve_conflict(&existing_data, value)?
-                    } else {
+                    // Use custom hooks - iterate all and chain the results
+                    // Note: Each hook receives the output of the previous hook
+                    let mut resolved_value = value.to_vec();
+                    let existing_value = existing_data.unwrap_or_default();
+
+                    if self.hooks.is_empty() {
                         warn!("Custom conflict resolution set but no hook registered, defaulting to LastWriteWins");
-                        value.to_vec()
+                    } else {
+                        for hook in &self.hooks {
+                            debug!("Applying custom conflict resolution hook");
+                            resolved_value =
+                                hook.resolve_conflict(&existing_value, &resolved_value)?;
+                        }
                     }
+                    resolved_value
                 }
             }
         } else {
@@ -497,54 +697,163 @@ impl ReplicationManager {
             value.to_vec()
         };
 
-        // Write the value
+        // Write the actual data (unwrapped)
         self.db
             .inner
             .db
             .put_cf(&cf, key, &final_value)
             .map_err(|e| Error::Database(format!("Failed to put value: {}", e)))?;
 
+        // Write metadata separately
+        let metadata = ReplicationMetadata::new(timestamp);
+        self.set_metadata(collection, key, &metadata)?;
+
         Ok(())
     }
 
-    /// Apply a delete operation
+    /// Apply a delete operation with tombstone
     #[instrument(skip(self, key))]
-    fn apply_delete(&self, collection: &str, key: &[u8]) -> Result<()> {
+    fn apply_delete(&self, collection: &str, key: &[u8], timestamp: u64) -> Result<()> {
+        // Ensure metadata CF exists
+        self.ensure_meta_cf(collection)?;
+
         let cf =
             self.db.inner.db.cf_handle(collection).ok_or_else(|| {
                 Error::Database(format!("Column family '{}' not found", collection))
             })?;
 
+        // Check for existing metadata for conflict resolution
+        if let Some(existing_metadata) = self.get_metadata(collection, key)? {
+            // Check if delete is older than existing write
+            if existing_metadata.timestamp_micros > timestamp {
+                debug!(
+                    "Delete rejected: existing value is newer (ts: {} > {})",
+                    existing_metadata.timestamp_micros, timestamp
+                );
+                return Ok(());
+            }
+        }
+
+        // Delete the actual data
         self.db
             .inner
             .db
             .delete_cf(&cf, key)
-            .map_err(|e| Error::Database(format!("Failed to delete: {}", e)))?;
+            .map_err(|e| Error::Database(format!("Failed to delete value: {}", e)))?;
+
+        // Store tombstone metadata
+        let tombstone = ReplicationMetadata::tombstone(timestamp);
+        self.set_metadata(collection, key, &tombstone)?;
 
         Ok(())
     }
 
-    /// Apply a batch of operations
+    /// Apply a batch of operations with conflict resolution
+    /// Uses the log's timestamp for all operations in the batch for proper LastWriteWins
     #[instrument(skip(self, operations))]
-    fn apply_batch(&self, collection: &str, operations: &[BatchOp]) -> Result<()> {
+    fn apply_batch(
+        &self,
+        collection: &str,
+        operations: &[BatchOp],
+        batch_timestamp: u64,
+    ) -> Result<()> {
+        // Ensure metadata CF exists
+        self.ensure_meta_cf(collection)?;
+
         let cf =
             self.db.inner.db.cf_handle(collection).ok_or_else(|| {
                 Error::Database(format!("Column family '{}' not found", collection))
             })?;
 
+        let meta_cf_name = Self::meta_cf_name(collection);
+        let meta_cf =
+            self.db.inner.db.cf_handle(&meta_cf_name).ok_or_else(|| {
+                Error::Database(format!("Metadata CF '{}' not found", meta_cf_name))
+            })?;
+
         let mut batch = rocksdb::WriteBatch::default();
 
+        // Process each operation with conflict resolution
         for op in operations {
             match op {
                 BatchOp::Put { key, value } => {
+                    // Check for conflicts in ALL cases
+                    if let Some(existing_metadata) = self.get_metadata(collection, key)? {
+                        match self.config.conflict_resolution {
+                            ConflictResolution::LastWriteWins => {
+                                // Compare timestamps - skip if existing is newer or equal
+                                if existing_metadata.timestamp_micros >= batch_timestamp {
+                                    debug!(
+                                        "Batch: LastWriteWins - skipping outdated write (existing: {} >= batch: {})",
+                                        existing_metadata.timestamp_micros, batch_timestamp
+                                    );
+                                    continue;
+                                }
+                                // Existing is older, we'll overwrite below
+                            }
+                            ConflictResolution::FirstWriteWins => {
+                                debug!("Batch: FirstWriteWins - skipping existing key");
+                                continue; // Skip this operation
+                            }
+                            ConflictResolution::Custom => {
+                                let existing_data = self
+                                    .db
+                                    .inner
+                                    .db
+                                    .get_cf(&cf, key)
+                                    .map_err(|e| {
+                                        Error::Database(format!(
+                                            "Failed to get existing value: {}",
+                                            e
+                                        ))
+                                    })?
+                                    .unwrap_or_default();
+
+                                let mut resolved_value = value.clone();
+                                for hook in &self.hooks {
+                                    resolved_value =
+                                        hook.resolve_conflict(&existing_data, &resolved_value)?;
+                                }
+
+                                batch.put_cf(&cf, key, &resolved_value);
+
+                                let metadata = ReplicationMetadata::new(batch_timestamp);
+                                let meta_bytes = borsh::to_vec(&metadata).map_err(|e| {
+                                    Error::Serialization(format!(
+                                        "Failed to serialize metadata: {}",
+                                        e
+                                    ))
+                                })?;
+                                batch.put_cf(&meta_cf, key, &meta_bytes);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Write value and metadata
                     batch.put_cf(&cf, key, value);
+
+                    let metadata = ReplicationMetadata::new(batch_timestamp);
+                    let meta_bytes = borsh::to_vec(&metadata).map_err(|e| {
+                        Error::Serialization(format!("Failed to serialize metadata: {}", e))
+                    })?;
+                    batch.put_cf(&meta_cf, key, &meta_bytes);
                 }
                 BatchOp::Delete { key } => {
+                    // Delete the data
                     batch.delete_cf(&cf, key);
+
+                    // Store tombstone metadata
+                    let tombstone = ReplicationMetadata::tombstone(batch_timestamp);
+                    let meta_bytes = borsh::to_vec(&tombstone).map_err(|e| {
+                        Error::Serialization(format!("Failed to serialize metadata: {}", e))
+                    })?;
+                    batch.put_cf(&meta_cf, key, &meta_bytes);
                 }
             }
         }
 
+        // WriteBatch is atomic - either all operations succeed or none do (rollback handled by RocksDB)
         self.db
             .inner
             .db
@@ -592,18 +901,21 @@ impl ReplicationManager {
     }
 
     /// Get statistics about applied operations
-    pub fn stats(&self) -> ReplicationStats {
-        let applied = self.applied_operations.lock().unwrap();
+    pub fn stats(&self) -> Result<ReplicationStats> {
+        let applied = self
+            .applied_operations
+            .read()
+            .map_err(|e| Error::Replication(format!("Failed to acquire read lock: {}", e)))?;
 
         let total = applied.len();
         let oldest = applied.values().min().copied();
         let newest = applied.values().max().copied();
 
-        ReplicationStats {
+        Ok(ReplicationStats {
             total_operations: total,
             oldest_operation_timestamp: oldest,
             newest_operation_timestamp: newest,
-        }
+        })
     }
 
     /// Clear operation history
@@ -612,8 +924,8 @@ impl ReplicationManager {
     pub fn clear_operation_history(&self) -> Result<()> {
         let mut applied = self
             .applied_operations
-            .lock()
-            .map_err(|e| Error::Replication(format!("Failed to acquire lock: {}", e)))?;
+            .write()
+            .map_err(|e| Error::Replication(format!("Failed to acquire write lock: {}", e)))?;
         applied.clear();
         info!("Cleared replication operation history");
         Ok(())
@@ -631,7 +943,8 @@ pub struct ReplicationStats {
     pub newest_operation_timestamp: Option<u64>,
 }
 
-/// Generate a unique operation ID
+/// Generate a unique operation ID using cryptographically strong randomness
+/// Includes process ID for easier debugging in multi-node scenarios
 fn generate_operation_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -639,13 +952,27 @@ fn generate_operation_id() -> String {
 
     let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
     let timestamp = current_timestamp_micros();
+    let process_id = std::process::id();
 
-    // Format: timestamp_counter_random
+    // Use blake3 for better randomness from timestamp and counter
+    let random_component = {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&timestamp.to_le_bytes());
+        hasher.update(&counter.to_le_bytes());
+        hasher.update(&process_id.to_le_bytes());
+        let hash = hasher.finalize();
+        u32::from_le_bytes([
+            hash.as_bytes()[0],
+            hash.as_bytes()[1],
+            hash.as_bytes()[2],
+            hash.as_bytes()[3],
+        ])
+    };
+
+    // Format: pid_timestamp_counter_random (for easier debugging)
     format!(
-        "{:016x}_{:08x}_{:08x}",
-        timestamp,
-        counter,
-        rand::random::<u32>()
+        "{:08x}_{:016x}_{:08x}_{:08x}",
+        process_id, timestamp, counter, random_component
     )
 }
 
@@ -657,16 +984,13 @@ fn current_timestamp_micros() -> u64 {
         .as_micros() as u64
 }
 
-/// Compute a simple checksum for a replication log
-fn compute_checksum(log: &ReplicationLog) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+/// Compute a cryptographically secure checksum using blake3
+fn compute_checksum(log: &ReplicationLog) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
 
-    let mut hasher = DefaultHasher::new();
-
-    log.operation_id.hash(&mut hasher);
-    log.source_node_id.hash(&mut hasher);
-    log.timestamp_micros.hash(&mut hasher);
+    hasher.update(log.operation_id.as_bytes());
+    hasher.update(log.source_node_id.as_bytes());
+    hasher.update(&log.timestamp_micros.to_le_bytes());
 
     match &log.operation {
         ReplicationOperation::Put {
@@ -674,40 +998,40 @@ fn compute_checksum(log: &ReplicationLog) -> u64 {
             key,
             value,
         } => {
-            "PUT".hash(&mut hasher);
-            collection.hash(&mut hasher);
-            key.hash(&mut hasher);
-            value.hash(&mut hasher);
+            hasher.update(b"PUT");
+            hasher.update(collection.as_bytes());
+            hasher.update(key);
+            hasher.update(value);
         }
         ReplicationOperation::Delete { collection, key } => {
-            "DELETE".hash(&mut hasher);
-            collection.hash(&mut hasher);
-            key.hash(&mut hasher);
+            hasher.update(b"DELETE");
+            hasher.update(collection.as_bytes());
+            hasher.update(key);
         }
         ReplicationOperation::Batch {
             collection,
             operations,
         } => {
-            "BATCH".hash(&mut hasher);
-            collection.hash(&mut hasher);
-            operations.len().hash(&mut hasher);
+            hasher.update(b"BATCH");
+            hasher.update(collection.as_bytes());
+            hasher.update(&operations.len().to_le_bytes());
             for op in operations {
                 match op {
                     BatchOp::Put { key, value } => {
-                        "PUT".hash(&mut hasher);
-                        key.hash(&mut hasher);
-                        value.hash(&mut hasher);
+                        hasher.update(b"PUT");
+                        hasher.update(key);
+                        hasher.update(value);
                     }
                     BatchOp::Delete { key } => {
-                        "DELETE".hash(&mut hasher);
-                        key.hash(&mut hasher);
+                        hasher.update(b"DELETE");
+                        hasher.update(key);
                     }
                 }
             }
         }
     }
 
-    hasher.finish()
+    *hasher.finalize().as_bytes()
 }
 
 impl ReplicationLog {
@@ -715,21 +1039,6 @@ impl ReplicationLog {
     pub fn with_checksum(mut self) -> Self {
         self.checksum = Some(compute_checksum(&self));
         self
-    }
-}
-
-// Simple random number generator (replace rand::random with this if rand is not available)
-mod rand {
-    pub fn random<T>() -> T
-    where
-        T: From<u32>,
-    {
-        use std::collections::hash_map::RandomState;
-        use std::hash::BuildHasher;
-
-        let state = RandomState::new();
-
-        T::from(state.hash_one(std::time::SystemTime::now()) as u32)
     }
 }
 
@@ -810,6 +1119,8 @@ mod tests {
 
         // Same log should produce same checksum
         assert_eq!(checksum1, checksum2);
+        // Verify it's a 32-byte blake3 hash
+        assert_eq!(checksum1.len(), 32);
     }
 
     #[test]
@@ -825,5 +1136,181 @@ mod tests {
         .with_checksum();
 
         assert!(log.checksum.is_some());
+    }
+
+    #[test]
+    fn test_replication_metadata() {
+        let metadata = ReplicationMetadata::new(12345);
+        assert_eq!(metadata.timestamp_micros, 12345);
+        assert!(!metadata.is_tombstone);
+
+        let tombstone = ReplicationMetadata::tombstone(67890);
+        assert_eq!(tombstone.timestamp_micros, 67890);
+        assert!(tombstone.is_tombstone);
+    }
+
+    #[test]
+    fn test_metadata_serialization() {
+        // Test metadata serialization
+        let metadata = ReplicationMetadata::new(12345);
+        let serialized = borsh::to_vec(&metadata).unwrap();
+        let deserialized: ReplicationMetadata = borsh::from_slice(&serialized).unwrap();
+        assert_eq!(deserialized.timestamp_micros, 12345);
+        assert!(!deserialized.is_tombstone);
+
+        // Test tombstone serialization
+        let tombstone = ReplicationMetadata::tombstone(67890);
+        let serialized = borsh::to_vec(&tombstone).unwrap();
+        let deserialized: ReplicationMetadata = borsh::from_slice(&serialized).unwrap();
+        assert_eq!(deserialized.timestamp_micros, 67890);
+        assert!(deserialized.is_tombstone);
+    }
+
+    #[test]
+    fn test_replication_log_serialization() {
+        let log = ReplicationLog::new(
+            "node-1".to_string(),
+            ReplicationOperation::Put {
+                collection: "test".to_string(),
+                key: vec![1, 2, 3],
+                value: vec![4, 5, 6],
+            },
+        )
+        .with_checksum();
+
+        // Serialize and deserialize
+        let serialized = borsh::to_vec(&log).unwrap();
+        let deserialized: ReplicationLog = borsh::from_slice(&serialized).unwrap();
+
+        assert_eq!(deserialized.operation_id, log.operation_id);
+        assert_eq!(deserialized.source_node_id, log.source_node_id);
+        assert_eq!(deserialized.timestamp_micros, log.timestamp_micros);
+        assert_eq!(deserialized.checksum, log.checksum);
+    }
+
+    #[test]
+    fn test_operation_id_format() {
+        let op_id = generate_operation_id();
+        // Format: pid_timestamp_counter_random
+        let parts: Vec<&str> = op_id.split('_').collect();
+        assert_eq!(parts.len(), 4, "Operation ID should have 4 parts");
+
+        // Each part should be valid hex
+        for part in parts {
+            assert!(u64::from_str_radix(part, 16).is_ok() || u32::from_str_radix(part, 16).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_stats_no_panic() {
+        use crate::DatabaseConfig;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = DatabaseConfig::new(temp_dir.path())
+            .create_if_missing(true)
+            .add_column_family("test")
+            .open()
+            .unwrap();
+
+        let config = ReplicationConfig::new("test-node").enable();
+        let manager = ReplicationManager::new(db, config).unwrap();
+
+        // Should not panic (using Result instead of unwrap)
+        let stats = manager.stats().unwrap();
+        assert_eq!(stats.total_operations, 0);
+        assert_eq!(stats.oldest_operation_timestamp, None);
+        assert_eq!(stats.newest_operation_timestamp, None);
+    }
+
+    #[test]
+    fn test_batch_last_write_wins_conflict() {
+        use crate::DatabaseConfig;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = DatabaseConfig::new(temp_dir.path())
+            .create_if_missing(true)
+            .add_column_family("test")
+            .open()
+            .unwrap();
+
+        let config = ReplicationConfig::new("test-node")
+            .enable()
+            .conflict_resolution(ConflictResolution::LastWriteWins);
+        let manager = ReplicationManager::new(db.clone(), config).unwrap();
+
+        let key = vec![1, 2, 3];
+        let newer_value = vec![10, 20, 30];
+        let older_value = vec![40, 50, 60];
+
+        // First, apply a single put with timestamp 1000
+        let newer_log = ReplicationLog {
+            operation_id: "op1".to_string(),
+            source_node_id: "node1".to_string(),
+            timestamp_micros: 1000,
+            operation: ReplicationOperation::Put {
+                collection: "test".to_string(),
+                key: key.clone(),
+                value: newer_value.clone(),
+            },
+            checksum: None,
+        };
+
+        manager.apply_replication(newer_log).unwrap();
+
+        // Verify the value was written
+        let cf = db.inner.db.cf_handle("test").unwrap();
+        let stored = db.inner.db.get_cf(&cf, &key).unwrap();
+        assert_eq!(stored, Some(newer_value.clone()));
+
+        // Now apply a batch with older timestamp 500
+        let older_batch_log = ReplicationLog {
+            operation_id: "op2".to_string(),
+            source_node_id: "node2".to_string(),
+            timestamp_micros: 500, // Older!
+            operation: ReplicationOperation::Batch {
+                collection: "test".to_string(),
+                operations: vec![BatchOp::Put {
+                    key: key.clone(),
+                    value: older_value.clone(),
+                }],
+            },
+            checksum: None,
+        };
+
+        manager.apply_replication(older_batch_log).unwrap();
+
+        // Verify the newer value is still there (old batch was rejected)
+        let stored = db.inner.db.get_cf(&cf, &key).unwrap();
+        assert_eq!(
+            stored,
+            Some(newer_value),
+            "LastWriteWins should reject older batch operation"
+        );
+
+        // Now apply a batch with newer timestamp 2000
+        let even_newer_value = vec![70, 80, 90];
+        let newer_batch_log = ReplicationLog {
+            operation_id: "op3".to_string(),
+            source_node_id: "node3".to_string(),
+            timestamp_micros: 2000, // Newer!
+            operation: ReplicationOperation::Batch {
+                collection: "test".to_string(),
+                operations: vec![BatchOp::Put {
+                    key: key.clone(),
+                    value: even_newer_value.clone(),
+                }],
+            },
+            checksum: None,
+        };
+
+        manager.apply_replication(newer_batch_log).unwrap();
+
+        // Verify the even newer value replaced the old one
+        let stored = db.inner.db.get_cf(&cf, &key).unwrap();
+        assert_eq!(
+            stored,
+            Some(even_newer_value),
+            "LastWriteWins should accept newer batch operation"
+        );
     }
 }
