@@ -8,13 +8,14 @@ description = "A high-performance, thread-safe RocksDB wrapper"
 repository = "https://github.com/OnlyF0uR/ngdb"
 keywords = ["database", "rocksdb", "kv-store", "embedded"]
 categories = ["database"]
+readme = "../README.md"
 
 [dependencies]
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "multi-threaded-cf"] }
 borsh = { version = "1.5", features = ["derive"] }
 blake3 = "1.8"
 tracing = "0.1"
-ngdb_macros = { path = "../ngdb_macros" }
+ngdb_macros = { workspace = true }
 
 [target.'cfg(not(windows))'.dependencies.rocksdb]
 version = "0.24"

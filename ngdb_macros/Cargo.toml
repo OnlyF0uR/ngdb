@@ -2,7 +2,9 @@
 name = "ngdb_macros"
 version.workspace = true
 edition = "2024"
-publish = false
+authors = ["OnlyF0uR"]
+license = "MIT OR Apache-2.0"
+description = "Procedural macro for NGDB"
 
 [lib]
 proc-macro = true
