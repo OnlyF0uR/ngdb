@@ -106,6 +106,7 @@
 mod config;
 mod db;
 mod error;
+mod refs;
 mod serialization;
 mod traits;
 
@@ -116,14 +117,15 @@ pub use db::{
     TransactionCollection,
 };
 pub use error::{Error, Result};
+pub use refs::{Ref, Referable};
 pub use serialization::{BincodeCodec, Codec};
 pub use traits::{KeyType, Storable};
 
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        BackupInfo, Collection, Database, DatabaseConfig, Error, IterationStatus, Result, Storable,
-        Transaction,
+        BackupInfo, Collection, Database, DatabaseConfig, Error, IterationStatus, Ref, Referable,
+        Result, Storable, Transaction,
     };
     pub use bincode::{Decode, Encode};
 }

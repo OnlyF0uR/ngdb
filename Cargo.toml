@@ -52,3 +52,7 @@ path = "examples/replication.rs"
 [[example]]
 name = "replication_full"
 path = "examples/replication_full.rs"
+
+[[example]]
+name = "nested_refs"
+path = "examples/nested_refs.rs"

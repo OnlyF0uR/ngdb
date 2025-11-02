@@ -476,6 +476,69 @@ impl<T: Storable> Collection<T> {
         }
     }
 
+    /// Retrieve a value from the collection by key and automatically resolve references
+    ///
+    /// If the type `T` implements `Referable`, this method will automatically fetch and populate
+    /// all referenced objects from their respective collections.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up
+    /// * `db` - The database handle to use for resolving references
+    ///
+    /// # Returns
+    ///
+    /// * `Some(T)` if the key exists (with all references resolved)
+    /// * `None` if the key doesn't exist
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deserialization fails, reference resolution fails, or there's a database error
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use ngdb::{Collection, Database, Storable, Referable, Ref};
+    /// # #[derive(bincode::Encode, bincode::Decode)]
+    /// # struct Post { id: u64, title: String }
+    /// # impl Storable for Post {
+    /// #     type Key = u64;
+    /// #     fn key(&self) -> u64 { self.id }
+    /// # }
+    /// # impl Referable for Post {
+    /// #     fn resolve_refs(&mut self, _db: &ngdb::Database) -> ngdb::Result<()> { Ok(()) }
+    /// # }
+    /// # #[derive(bincode::Encode, bincode::Decode)]
+    /// # struct Comment { id: u64, text: String, post: Ref<Post> }
+    /// # impl Storable for Comment {
+    /// #     type Key = u64;
+    /// #     fn key(&self) -> u64 { self.id }
+    /// # }
+    /// # fn example(collection: Collection<Comment>, db: Database) -> Result<(), ngdb::Error> {
+    /// let comment = collection.get_with_refs(&1, &db)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(skip(self, db))]
+    pub fn get_with_refs(&self, key: &T::Key, db: &crate::Database) -> Result<Option<T>>
+    where
+        T: crate::Referable,
+    {
+        let _guard = self.check_shutdown()?;
+
+        let key_bytes = key.to_bytes()?;
+        let cf = self.cf()?;
+
+        match self.db.get_cf(&cf, key_bytes)? {
+            Some(value_bytes) => {
+                let mut value: T = helpers::deserialize(&value_bytes)?;
+                value.resolve_refs(db)?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Retrieve multiple values at once using optimized multi_get
     ///
     /// This is significantly faster than calling `get()` multiple times
@@ -513,6 +576,65 @@ impl<T: Storable> Collection<T> {
             match result {
                 Ok(Some(value_bytes)) => {
                     let value: T = helpers::deserialize(&value_bytes)?;
+                    output.push(Some(value));
+                }
+                Ok(None) => output.push(None),
+                Err(e) => {
+                    return Err(Error::Database(format!("Multi-get failed: {}", e)));
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// Retrieve multiple values at once with automatic reference resolution
+    ///
+    /// This is significantly faster than calling `get_with_refs()` multiple times
+    /// as it performs a single batched operation for the base objects, then resolves
+    /// all references.
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - Slice of keys to retrieve
+    /// * `db` - The database handle to use for resolving references
+    ///
+    /// # Returns
+    ///
+    /// A vector of optional values in the same order as the input keys (with all references resolved)
+    #[instrument(skip(self, keys, db))]
+    pub fn get_many_with_refs(
+        &self,
+        keys: &[T::Key],
+        db: &crate::Database,
+    ) -> Result<Vec<Option<T>>>
+    where
+        T: crate::Referable,
+    {
+        let _guard = self.check_shutdown()?;
+
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Convert all keys to bytes
+        let key_bytes: Result<Vec<Vec<u8>>> = keys.iter().map(|k| k.to_bytes()).collect();
+        let key_bytes = key_bytes?;
+
+        // Prepare column family references
+        let cf = self.cf()?;
+        let cf_refs: Vec<_> = key_bytes.iter().map(|k| (&cf, k.as_slice())).collect();
+
+        // Perform multi_get
+        let results = self.db.multi_get_cf(cf_refs);
+
+        // Process results and resolve references
+        let mut output = Vec::with_capacity(keys.len());
+        for result in results {
+            match result {
+                Ok(Some(value_bytes)) => {
+                    let mut value: T = helpers::deserialize(&value_bytes)?;
+                    value.resolve_refs(db)?;
                     output.push(Some(value));
                 }
                 Ok(None) => output.push(None),
