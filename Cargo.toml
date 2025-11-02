@@ -1,7 +1,7 @@
 [package]
 name = "ngdb"
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 authors = ["OnlyF0uR"]
 license = "MIT OR Apache-2.0"
 description = "A high-performance, thread-safe RocksDB wrapper"
