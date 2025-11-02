@@ -1,0 +1,69 @@
+[package]
+name = "ngdb"
+version.workspace = true
+edition = "2024"
+authors = ["OnlyF0uR"]
+license = "MIT OR Apache-2.0"
+description = "A high-performance, thread-safe RocksDB wrapper"
+repository = "https://github.com/OnlyF0uR/ngdb"
+keywords = ["database", "rocksdb", "kv-store", "embedded"]
+categories = ["database"]
+
+[dependencies]
+rocksdb = { version = "0.24", default-features = false, features = ["lz4", "multi-threaded-cf"] }
+borsh = { version = "1.5", features = ["derive"] }
+blake3 = "1.8"
+tracing = "0.1"
+ngdb_macros = { path = "../ngdb_macros" }
+
+[target.'cfg(not(windows))'.dependencies.rocksdb]
+version = "0.24"
+default-features = false
+features = ["lz4", "multi-threaded-cf", "jemalloc"]
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[lib]
+name = "ngdb"
+path = "src/lib.rs"
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "user_struct"
+path = "examples/user_struct.rs"
+
+[[example]]
+name = "advanced"
+path = "examples/advanced.rs"
+
+[[example]]
+name = "transactions"
+path = "examples/transactions.rs"
+
+[[example]]
+name = "thread_safe_transactions"
+path = "examples/thread_safe_transactions.rs"
+
+[[example]]
+name = "backup_restore"
+path = "examples/backup_restore.rs"
+
+[[example]]
+name = "replication"
+path = "examples/replication.rs"
+
+[[example]]
+name = "replication_full"
+path = "examples/replication_full.rs"
+
+[[example]]
+name = "nested_refs"
+path = "examples/nested_refs.rs"
+
+[[example]]
+name = "derive_macro"
+path = "examples/derive_macro.rs"

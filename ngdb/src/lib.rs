@@ -167,7 +167,7 @@ pub use serialization::{BincodeCodec, Codec};
 pub use traits::{KeyType, Storable};
 
 // Re-export attribute macro
-pub use ngdb_derive::ngdb;
+pub use ngdb_macros::ngdb;
 
 /// Re-export commonly used types
 pub mod prelude {
@@ -176,7 +176,8 @@ pub mod prelude {
         IterationStatus, Ref, Referable, ReplicationConfig, ReplicationLog, ReplicationManager,
         ReplicationOperation, Result, Storable, Transaction,
     };
-    pub use borsh::{BorshDeserialize, BorshSerialize};
+
+    pub use ngdb_macros::ngdb;
 }
 
 #[cfg(test)]

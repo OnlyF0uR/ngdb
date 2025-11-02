@@ -6,13 +6,13 @@
 //! - Apply replication logs to replica nodes
 //! - Verify data consistency across nodes
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{
     DatabaseConfig, ReplicationConfig, ReplicationLog, ReplicationManager, ReplicationOperation,
-    Result, Storable,
+    Result, Storable, ngdb,
 };
 
-#[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
+#[derive(PartialEq)]
+#[ngdb("documents")]
 struct Document {
     id: u64,
     title: String,
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
         .add_column_family("documents")
         .open()?;
 
-    let primary_docs = primary_db.collection::<Document>("documents")?;
+    let primary_docs = Document::collection(&primary_db)?;
 
     // Setup replica node with replication manager
     let replica_db = DatabaseConfig::new("./data/replication_replica")
@@ -125,7 +125,7 @@ fn main() -> Result<()> {
         replica_manager.apply_replication(batch_log)?;
         println!("Replica: Applied batch replication");
 
-        let replica_docs = replica_db.collection::<Document>("documents")?;
+        let replica_docs = Document::collection(&replica_db)?;
         let count = replica_docs.iter()?.count()?;
         println!("Replica has {} documents\n", count);
     }

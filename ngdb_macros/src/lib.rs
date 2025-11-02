@@ -4,7 +4,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Lit, Type};
+use syn::{Data, DeriveInput, Fields, Lit, Type, parse_macro_input};
 
 /// Attribute macro for defining an NGDB collection
 ///
@@ -81,12 +81,10 @@ pub fn ngdb(attr: TokenStream, item: TokenStream) -> TokenStream {
                             // Extract the T from Ref<T>
                             if let syn::PathArguments::AngleBracketed(args) =
                                 &last_segment.arguments
-                            {
-                                if let Some(syn::GenericArgument::Type(Type::Path(inner_type))) =
+                                && let Some(syn::GenericArgument::Type(Type::Path(inner_type))) =
                                     args.args.first()
-                                {
-                                    return Some((field_name.clone(), inner_type.clone()));
-                                }
+                            {
+                                return Some((field_name.clone(), inner_type.clone()));
                             }
                         }
                     }
