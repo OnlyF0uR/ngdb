@@ -83,7 +83,7 @@
 //!     id: u64,
 //!     text: String,
 //!     author: Ref<User>,
-//!     post: Ref<Post>,  // Post also has a Ref<User> - automatically resolved!
+//!     post: Ref<Post>,  // Post also has a Ref<User>
 //! }
 //!
 //! // The #[ngdb] attribute generates resolve_all() that:
