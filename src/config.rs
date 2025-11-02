@@ -2,7 +2,7 @@
 //!
 //! This module provides a fluent builder API for configuring and opening databases.
 
-use crate::{db::Database, Error, Result};
+use crate::{Error, Result, db::Database};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 

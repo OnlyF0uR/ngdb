@@ -1,9 +1,8 @@
 //! User struct example demonstrating custom types with validation
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use ngdb::{DatabaseConfig, Result, Storable};
+use ngdb::{DatabaseConfig, Result, Storable, ngdb};
 
-#[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
+#[ngdb("users")]
 struct User {
     id: u64,
     username: String,
@@ -51,9 +50,6 @@ fn main() -> Result<()> {
         .add_column_family("users")
         .open()?;
 
-    let users = db.collection::<User>("users")?;
-
-    // Create and store users
     let alice = User {
         id: 1,
         username: "alice".to_string(),
@@ -61,7 +57,7 @@ fn main() -> Result<()> {
         age: 28,
         active: true,
     };
-    users.put(&alice)?;
+    alice.save(&db)?;
 
     let bob = User {
         id: 2,
@@ -70,18 +66,13 @@ fn main() -> Result<()> {
         age: 35,
         active: true,
     };
-    users.put(&bob)?;
+    bob.save(&db)?;
+
+    let users = User::collection(&db)?;
 
     // Retrieve a user
     if let Some(user) = users.get(&1)? {
         println!("Found user: {} ({})", user.username, user.email);
-    }
-
-    // Check existence
-    for id in 1..=3 {
-        if users.exists(&id)? {
-            println!("User {} exists", id);
-        }
     }
 
     // Multi-get for batch retrieval
@@ -105,7 +96,7 @@ fn main() -> Result<()> {
     // Update a user
     let mut updated = users.get(&2)?.unwrap();
     updated.email = "bob.new@example.com".to_string();
-    users.put(&updated)?;
+    updated.save(&db)?;
 
     // Test validation
     let invalid = User {
@@ -116,14 +107,13 @@ fn main() -> Result<()> {
         active: true,
     };
 
-    match users.put(&invalid) {
+    match invalid.save(&db) {
         Ok(_) => println!("Error: invalid user was accepted"),
         Err(e) => println!("Validation rejected: {}", e),
     }
 
     // Delete a user
     users.delete(&1)?;
-    println!("Deleted user 1");
 
     // Statistics
     let count = users.iter()?.count()?;

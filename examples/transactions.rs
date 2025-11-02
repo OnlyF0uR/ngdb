@@ -1,9 +1,8 @@
 //! Transaction example demonstrating atomic operations across multiple writes
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use ngdb::{DatabaseConfig, Result, Storable};
+use ngdb::{DatabaseConfig, Result, Storable, ngdb};
 
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[ngdb("accounts")]
 struct Account {
     id: u64,
     name: String,
@@ -33,7 +32,7 @@ fn main() -> Result<()> {
         .add_column_family("accounts")
         .open()?;
 
-    let accounts = db.collection::<Account>("accounts")?;
+    let accounts = Account::collection(&db)?;
 
     accounts.put(&Account {
         id: 1,

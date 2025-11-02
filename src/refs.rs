@@ -4,25 +4,27 @@
 //! `Storable` objects. When a struct contains `Ref<T>`, only the key is stored,
 //! and the referenced object is automatically fetched during retrieval.
 //!
-//! After resolution, you can access the referenced value transparently via `Deref`:
-//! `post.author.name` instead of `post.author.get().unwrap().name`
+//! After resolution, you can access the referenced value via `.get()`:
+//! `post.author.get()?.name` for safe access with error propagation
 //!
 //! # Key Features
 //!
 //! - **Space Efficient**: Only stores keys, not full objects
-//! - **Transparent Access**: Use `Deref` to access resolved references directly
+//! - **Safe Access**: Use `.get()` to access resolved references with error handling
 //! - **Automatic Resolution**: Call `get_with_refs()` to fetch and populate all references
 //! - **Type Safe**: Compile-time verification of reference relationships
 //! - **Nested Support**: References can contain other references
+//! - **Attribute Macro**: Use `#[ngdb("name")]` to automatically generate all boilerplate
 //!
-//! # Basic Usage
+//! # Quick Start with NGDB Attribute (Recommended)
+//!
+//! The easiest way to use references is with the `#[ngdb("name")]` attribute macro:
 //!
 //! ```rust,ignore
-//! use ngdb::{Storable, Referable, Ref, Database, Result};
-//! use borsh::{BorshSerialize, BorshDeserialize};
+//! use ngdb::{Storable, Ref, Database, Result};
 //!
 //! // Define a User type
-//! #[derive(Debug, BorshSerialize, BorshDeserialize)]
+//! #[ngdb("users")]
 //! struct User {
 //!     id: u64,
 //!     name: String,
@@ -33,15 +35,8 @@
 //!     fn key(&self) -> Self::Key { self.id }
 //! }
 //!
-//! // User has no references, so resolve_refs does nothing
-//! impl Referable for User {
-//!     fn resolve_refs(&mut self, _db: &Database) -> Result<()> {
-//!         Ok(())
-//!     }
-//! }
-//!
 //! // Define a Post that references a User
-//! #[derive(Debug, Encode, Decode)]
+//! #[ngdb("posts")]
 //! struct Post {
 //!     id: u64,
 //!     title: String,
@@ -53,45 +48,63 @@
 //!     fn key(&self) -> Self::Key { self.id }
 //! }
 //!
-//! // Post has a reference to User, so we resolve it
-//! impl Referable for Post {
-//!     fn resolve_refs(&mut self, db: &Database) -> Result<()> {
-//!         self.author.resolve_from_db(db, "users")?;
-//!         Ok(())
-//!     }
-//! }
+//! // The #[ngdb] attribute automatically:
+//! // - Adds derives: BorshSerialize, BorshDeserialize, Clone, Debug
+//! // - Generates Post::collection_name() -> "posts"
+//! // - Generates Post::collection(&db) -> Collection<Post>
+//! // - Generates Post::save(&self, db) -> Result<()>
+//! // - Implements Referable that resolves all Ref<T> fields
 //!
-//! // Store objects
+//! // Store objects (no need to manually get collections!)
 //! let user = User { id: 1, name: "Alice".to_string() };
-//! users.put(&user)?;
+//! user.save(&db)?;
 //!
 //! let post = Post {
 //!     id: 1,
 //!     title: "Hello World".to_string(),
 //!     author: Ref::from_value(user),
 //! };
-//! posts.put(&post)?;
+//! post.save(&db)?;
 //!
 //! // Retrieve with automatic reference resolution
+//! let posts = Post::collection(&db)?;
 //! let post = posts.get_with_refs(&1, &db)?.unwrap();
-//! println!("Author: {}", post.author.name);  // Transparent access!
+//! println!("Author: {}", post.author.get()?.name);  // Safe access!
 //! ```
 //!
 //! # Nested References
 //!
 //! References can be nested - a referenced object can itself contain references.
-//! To handle nested resolution, manually call `resolve_refs()` on resolved objects:
+//! The attribute macro automatically handles this:
 //!
 //! ```rust,ignore
-//! impl Referable for Comment {
-//!     fn resolve_refs(&mut self, db: &Database) -> Result<()> {
-//!         // Resolve direct references
-//!         self.author.resolve_from_db(db, "users")?;
-//!         self.post.resolve_from_db(db, "posts")?;
+//! #[ngdb("comments")]
+//! struct Comment {
+//!     id: u64,
+//!     text: String,
+//!     author: Ref<User>,
+//!     post: Ref<Post>,  // Post also has a Ref<User> - automatically resolved!
+//! }
 //!
-//!         // Also resolve nested references within Post
-//!         if let Ok(post) = self.post.get_mut() {
-//!             post.resolve_refs(db)?;
+//! // The #[ngdb] attribute generates resolve_all() that:
+//! // 1. Resolves self.author from "users" collection
+//! // 2. Resolves self.post from "posts" collection
+//! // 3. Calls post.resolve_all() to resolve nested references
+//! ```
+//!
+//! # Manual Implementation (Advanced)
+//!
+//! If you need more control, you can manually implement `Referable`:
+//!
+//! ```rust,ignore
+//! impl Referable for Post {
+//!     fn resolve_all(&mut self, db: &Database) -> Result<()> {
+//!         // Manually resolve individual references
+//!         self.author.resolve(db, User::collection_name())?;
+//!
+//!         // Optional: resolve nested references
+//!         if let Ok(author) = self.author.get_mut() {
+//!             author.resolve_all(db)?;
 //!         }
 //!         Ok(())
 //!     }
@@ -102,19 +115,19 @@
 //!
 //! - **Circular references are NOT supported**: Don't create cycles (A -> B -> A)
 //! - **Serialization**: Only the key is serialized, not the full object
-//! - **Panics**: Dereferencing an unresolved `Ref<T>` will panic. Use `get_with_refs()` or `.get()` first
+//! - **Error Handling**: Always use `.get()` or `.get_mut()` to access resolved references safely
 //! - **Performance**: Each reference resolution requires a database lookup
+//! - **Attribute Macro**: Use `#[ngdb("name")]` to eliminate boilerplate and auto-add derives
 
 use crate::{Database, Error, Result, Storable};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::io::{Read, Write};
-use std::ops::{Deref, DerefMut};
 
 /// A reference to another `Storable` object.
 ///
 /// `Ref<T>` stores only the key of the referenced object during serialization.
 /// After calling `get_with_refs()`, the referenced object is automatically fetched
-/// and you can access it transparently via deref.
+/// and you can access it safely via `.get()` or `.get_mut()`.
 ///
 /// # Examples
 ///
@@ -131,7 +144,7 @@ use std::ops::{Deref, DerefMut};
 ///
 /// // After get_with_refs():
 /// let post = posts.get_with_refs(&1, &db)?.unwrap();
-/// println!("Author: {}", post.author.name); // Transparent access!
+/// println!("Author: {}", post.author.get()?.name); // Safe access!
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ref<T: Storable> {
@@ -203,7 +216,7 @@ impl<T: Storable> Ref<T> {
     /// Resolve this reference by fetching from the database.
     ///
     /// This is used during automatic resolution.
-    pub fn resolve_from_db(&mut self, db: &Database, collection_name: &str) -> Result<()>
+    pub fn resolve(&mut self, db: &Database, collection_name: &str) -> Result<()>
     where
         T: Referable,
     {
@@ -227,28 +240,6 @@ impl<T: Storable> Ref<T> {
     /// Consume the Ref and return the inner value if resolved.
     pub fn into_inner(self) -> Option<T> {
         self.value.map(|b| *b)
-    }
-}
-
-// Implement Deref to allow transparent access to the inner value
-impl<T: Storable> Deref for Ref<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.value
-            .as_ref()
-            .expect("Attempted to access unresolved reference. Use get_with_refs() to resolve references.")
-            .as_ref()
-    }
-}
-
-// Implement DerefMut for mutable access
-impl<T: Storable> DerefMut for Ref<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value
-            .as_mut()
-            .expect("Attempted to access unresolved reference. Use get_with_refs() to resolve references.")
-            .as_mut()
     }
 }
 
@@ -291,9 +282,9 @@ impl<T: Storable> BorshDeserialize for Ref<T> {
 ///     fn key(&self) -> Self::Key { self.id }
 /// }
 ///
-/// // User has no references, so resolve_refs does nothing
+/// // User has no references, so resolve_all does nothing
 /// impl Referable for User {
-///     fn resolve_refs(&mut self, _db: &Database) -> Result<()> {
+///     fn resolve_all(&mut self, _db: &Database) -> Result<()> {
 ///         Ok(())
 ///     }
 /// }
@@ -312,8 +303,8 @@ impl<T: Storable> BorshDeserialize for Ref<T> {
 ///
 /// // Post has a reference to User, so we resolve it
 /// impl Referable for Post {
-///     fn resolve_refs(&mut self, db: &Database) -> Result<()> {
-///         self.author.resolve_from_db(db, "users")?;
+///     fn resolve_all(&mut self, db: &Database) -> Result<()> {
+///         self.author.resolve(db, "users")?;
 ///         Ok(())
 ///     }
 /// }
@@ -322,9 +313,9 @@ pub trait Referable: Storable {
     /// Resolve all references in this object.
     ///
     /// For types without references, this should just return `Ok(())`.
-    /// For types with `Ref<T>` fields, call `resolve_from_db()` on each field.
-    /// For nested references, also call `resolve_refs()` on the resolved objects.
-    fn resolve_refs(&mut self, db: &Database) -> Result<()>;
+    /// For types with `Ref<T>` fields, call `resolve()` on each field.
+    /// For nested references, also call `resolve_all()` on the resolved objects.
+    fn resolve_all(&mut self, db: &Database) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -379,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ref_deref() {
+    fn test_ref_access_via_get() {
         #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
         struct TestType {
             id: u64,
@@ -399,9 +390,10 @@ mod tests {
         };
         let reference = Ref::from_value(value.clone());
 
-        // Test transparent access via Deref
-        assert_eq!((*reference).value, "test");
-        assert_eq!(reference.id, 42);
+        // Test safe access via get()
+        let accessed = reference.get().unwrap();
+        assert_eq!(accessed.value, "test");
+        assert_eq!(accessed.id, 42);
     }
 
     #[test]
@@ -429,8 +421,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Attempted to access unresolved reference")]
-    fn test_ref_deref_panics_when_unresolved() {
+    fn test_ref_get_returns_error_when_unresolved() {
         #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
         struct TestType {
             id: u64,
@@ -445,6 +436,6 @@ mod tests {
         }
 
         let reference = Ref::<TestType>::new(42);
-        let _ = (*reference).value; // Should panic
+        assert!(reference.get().is_err()); // Should return error, not panic
     }
 }

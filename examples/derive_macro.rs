@@ -1,6 +1,7 @@
-//! Nested references example for NGDB
+//! Example demonstrating the NGDB attribute macro
 //!
-//! Demonstrates relationships between objects with automatic reference resolution.
+//! Shows how #[ngdb] eliminates boilerplate with automatic derives,
+//! collection methods, and reference resolution.
 
 use ngdb::{DatabaseConfig, Ref, Result, Storable, ngdb};
 
@@ -49,51 +50,35 @@ impl Storable for Comment {
 }
 
 fn main() -> Result<()> {
-    let db = DatabaseConfig::new("./data/nested_refs_example")
+    let db = DatabaseConfig::new("./data/derive_example")
         .create_if_missing(true)
         .add_column_family("users")
         .add_column_family("posts")
         .add_column_family("comments")
         .open()?;
 
-    let alice = User {
+    let user = User {
         id: 1,
-        name: "Alice".to_string(),
-        email: "alice@example.com".to_string(),
+        name: "Bob".to_string(),
+        email: "bob@example.com".to_string(),
     };
-    alice.save(&db)?;
+    user.save(&db)?;
 
     let post = Post {
         id: 1,
-        title: "Introduction to NGDB".to_string(),
-        content: "NGDB is a high-performance RocksDB wrapper...".to_string(),
-        author: Ref::from_value(alice.clone()),
+        title: "Hello NGDB!".to_string(),
+        content: "Learning about the macro...".to_string(),
+        author: Ref::from_value(user.clone()),
     };
     post.save(&db)?;
 
-    Comment {
+    let comment = Comment {
         id: 1,
-        text: "Great article!".to_string(),
+        text: "Great post!".to_string(),
         author: Ref::new(1),
         post: Ref::new(1),
-    }
-    .save(&db)?;
-
-    Comment {
-        id: 2,
-        text: "Very helpful, thanks!".to_string(),
-        author: Ref::new(1),
-        post: Ref::new(1),
-    }
-    .save(&db)?;
-
-    Comment {
-        id: 3,
-        text: "Looking forward to more.".to_string(),
-        author: Ref::new(1),
-        post: Ref::new(1),
-    }
-    .save(&db)?;
+    };
+    comment.save(&db)?;
 
     // Retrieve with automatic reference resolution
     let comments = Comment::collection(&db)?;
@@ -107,15 +92,6 @@ fn main() -> Result<()> {
     );
     println!("Post: '{}'", resolved.post.get()?.title);
     println!("Post Author: {}", resolved.post.get()?.author.get()?.name);
-
-    // Batch retrieval with automatic reference resolution
-    let ids = vec![1, 2, 3];
-    let all_comments = comments.get_many_with_refs(&ids, &db)?;
-
-    println!("\nAll comments:");
-    for comment in all_comments.into_iter().flatten() {
-        println!("'{}' by {}", comment.text, comment.author.get()?.name);
-    }
 
     Ok(())
 }

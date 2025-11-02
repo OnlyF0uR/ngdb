@@ -2,10 +2,9 @@
 //!
 //! Demonstrates core CRUD operations with a simple product database.
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use ngdb::{DatabaseConfig, Result, Storable};
+use ngdb::{DatabaseConfig, Result, Storable, ngdb};
 
-#[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
+#[ngdb("products")]
 struct Product {
     id: u64,
     name: String,
@@ -43,8 +42,6 @@ fn main() -> Result<()> {
         .add_column_family("products")
         .open()?;
 
-    let products = db.collection::<Product>("products")?;
-
     // Create and store products
     let laptop = Product {
         id: 1,
@@ -52,7 +49,7 @@ fn main() -> Result<()> {
         price: 999.99,
         stock: 15,
     };
-    products.put(&laptop)?;
+    laptop.save(&db)?;
 
     let mouse = Product {
         id: 2,
@@ -60,22 +57,19 @@ fn main() -> Result<()> {
         price: 29.99,
         stock: 100,
     };
-    products.put(&mouse)?;
+    mouse.save(&db)?;
+
+    let products = Product::collection(&db)?;
 
     // Retrieve a single item
     if let Some(product) = products.get(&1)? {
         println!("Found: {} - ${}", product.name, product.price);
     }
 
-    // Check existence
-    if products.exists(&2)? {
-        println!("Product 2 exists");
-    }
-
     // Multi-get for efficient batch retrieval
     let ids = vec![1, 2];
     let results = products.get_many(&ids)?;
-    println!("Retrieved {} products via multi-get", results.len());
+    println!("Retrieved {} products", results.len());
 
     // Iterate over all items
     println!("All products:");
@@ -91,18 +85,15 @@ fn main() -> Result<()> {
         price: 1499.99,
         stock: 10,
     };
-    products.put(&updated)?;
+    updated.save(&db)?;
 
     // Delete an item
     products.delete(&2)?;
-    println!("Deleted product 2");
 
     // Get statistics
     let count = products.iter()?.count()?;
     println!("Total products: {}", count);
 
-    // Flush and shutdown
-    products.flush()?;
     db.shutdown()?;
 
     Ok(())

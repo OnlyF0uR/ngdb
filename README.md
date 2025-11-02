@@ -32,10 +32,9 @@ borsh = { version = "1.5", features = ["derive"] }
 ## Quick Start
 
 ```rust
-use ngdb::{Database, DatabaseConfig, Storable};
-use borsh::{BorshSerialize, BorshDeserialize};
+use ngdb::{DatabaseConfig, Storable, ngdb};
 
-#[derive(Debug, BorshSerialize, BorshDeserialize)]
+#[ngdb("users")]
 struct User {
     id: u64,
     name: String,
@@ -50,24 +49,19 @@ impl Storable for User {
 }
 
 fn main() -> Result<(), ngdb::Error> {
-    // Open database with column family
     let db = DatabaseConfig::new("./data")
         .create_if_missing(true)
         .add_column_family("users")
         .open()?;
 
-    // Get typed collection
-    let users = db.collection::<User>("users")?;
-
-    // Store data
     let user = User {
         id: 1,
         name: "Alice".to_string(),
         email: "alice@example.com".to_string(),
     };
-    users.put(&user)?;
+    user.save(&db)?;
 
-    // Retrieve data
+    let users = User::collection(&db)?;
     if let Some(user) = users.get(&1)? {
         println!("Found: {} <{}>", user.name, user.email);
     }
@@ -83,10 +77,12 @@ fn main() -> Result<(), ngdb::Error> {
 Collections provide type-safe access to column families:
 
 ```rust
-let products = db.collection::<Product>("products")?;
+// Save using the generated save() method
+product.save(&db)?;
+
+let products = Product::collection(&db)?;
 
 // Single operations
-products.put(&product)?;
 let item = products.get(&id)?;
 products.delete(&id)?;
 
@@ -108,7 +104,6 @@ ACID transactions ensure atomic operations:
 let txn = db.transaction()?;
 let accounts = txn.collection::<Account>("accounts")?;
 
-// All operations are isolated
 let mut alice = accounts.get(&1)?.unwrap();
 let mut bob = accounts.get(&2)?.unwrap();
 
@@ -118,7 +113,6 @@ bob.balance += 100;
 accounts.put(&alice)?;
 accounts.put(&bob)?;
 
-// Commit atomically or rollback on error
 txn.commit()?;
 ```
 
@@ -127,9 +121,10 @@ txn.commit()?;
 Efficient bulk writes:
 
 ```rust
+let users = User::collection(&db)?;
 let mut batch = users.batch();
 for i in 0..1000 {
-    batch.put(&User { id: i, name: format!("User {}", i) })?;
+    batch.put(&User { id: i, name: format!("User {}", i), email: format!("user{}@example.com", i) })?;
 }
 batch.commit()?;
 ```
@@ -139,11 +134,11 @@ batch.commit()?;
 Point-in-time consistent reads:
 
 ```rust
-let snapshot = db.snapshot()?;
-let users = snapshot.collection::<User>("users")?;
+let users = User::collection(&db)?;
+let snapshot = users.snapshot()?;
 
 // Read from snapshot while database continues to change
-let user = users.get(&1)?;
+let user = snapshot.get(&1)?;
 ```
 
 ### Backup & Restore
@@ -164,25 +159,25 @@ Database::restore_from_backup("./backups", "./restored")?;
 Efficiently store object relationships:
 
 ```rust
-use ngdb::{Ref, Referable};
+use ngdb::{Ref, ngdb};
 
-#[derive(BorshSerialize, BorshDeserialize)]
+#[ngdb("posts")]
 struct Post {
     id: u64,
     title: String,
     author: Ref<User>, // Only stores user ID
 }
 
-impl Referable for Post {
-    fn resolve_refs(&mut self, db: &Database) -> Result<()> {
-        self.author.resolve_from_db(db, "users")?;
-        Ok(())
-    }
+impl Storable for Post {
+    type Key = u64;
+    fn key(&self) -> Self::Key { self.id }
 }
 
+// The #[ngdb] macro automatically implements Referable
 // Retrieve with automatic reference resolution
+let posts = Post::collection(&db)?;
 let post = posts.get_with_refs(&1, &db)?.unwrap();
-println!("Author: {}", post.author.name); // Transparent access
+println!("Author: {}", post.author.get()?.name);
 ```
 
 ## Distributed Replication
@@ -227,13 +222,14 @@ The repository includes comprehensive examples:
 
 - `basic_usage.rs` - CRUD operations
 - `user_struct.rs` - Working with custom structs
+- `derive_macro.rs` - Using the `#[ngdb]` macro
+- `nested_refs.rs` - Object relationships with `Ref<T>`
 - `advanced.rs` - Advanced features and patterns
 - `transactions.rs` - ACID transactions with rollback
 - `thread_safe_transactions.rs` - Concurrent access patterns
 - `backup_restore.rs` - Disaster recovery
 - `replication.rs` - Basic replication setup
 - `replication_full.rs` - Complete replication system
-- `nested_refs.rs` - Object relationships with `Ref<T>`
 
 Run an example:
 ```bash

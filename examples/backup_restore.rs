@@ -1,9 +1,8 @@
 //! Backup and restore example demonstrating disaster recovery capabilities
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use ngdb::{Database, DatabaseConfig, Result, Storable};
+use ngdb::{Database, DatabaseConfig, Result, Storable, ngdb};
 
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[ngdb("users")]
 struct User {
     id: u64,
     name: String,
@@ -18,7 +17,7 @@ impl Storable for User {
     }
 }
 
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[ngdb("posts")]
 struct Post {
     id: u64,
     user_id: u64,
@@ -35,8 +34,8 @@ impl Storable for Post {
 }
 
 fn create_sample_data(db: &Database) -> Result<()> {
-    let users = db.collection::<User>("users")?;
-    let posts = db.collection::<Post>("posts")?;
+    let users = User::collection(db)?;
+    let posts = Post::collection(db)?;
 
     for i in 1..=5 {
         users.put(&User {
@@ -59,8 +58,8 @@ fn create_sample_data(db: &Database) -> Result<()> {
 }
 
 fn print_counts(db: &Database) -> Result<()> {
-    let users = db.collection::<User>("users")?;
-    let posts = db.collection::<Post>("posts")?;
+    let users = User::collection(db)?;
+    let posts = Post::collection(db)?;
 
     let user_count = users.iter()?.count()?;
     let post_count = posts.iter()?.count()?;
@@ -104,7 +103,7 @@ fn main() -> Result<()> {
             .add_column_family("posts")
             .open()?;
 
-        let users = db.collection::<User>("users")?;
+        let users = User::collection(&db)?;
 
         users.put(&User {
             id: 6,
@@ -150,8 +149,8 @@ fn main() -> Result<()> {
             .add_column_family("posts")
             .open()?;
 
-        let users = verified_db.collection::<User>("users")?;
-        let posts = verified_db.collection::<Post>("posts")?;
+        let users = User::collection(&verified_db)?;
+        let posts = Post::collection(&verified_db)?;
 
         let user6_exists = users.exists(&6)?;
         let user1_exists = users.exists(&1)?;

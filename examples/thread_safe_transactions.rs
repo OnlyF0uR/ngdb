@@ -1,11 +1,10 @@
 //! Thread-safe transaction example demonstrating concurrent access patterns
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use ngdb::{DatabaseConfig, Result, Storable};
+use ngdb::{DatabaseConfig, Result, Storable, ngdb};
 use std::sync::Arc;
 use std::thread;
 
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, PartialEq)]
+#[ngdb("counters")]
 struct Counter {
     id: String,
     value: i64,
@@ -25,7 +24,7 @@ fn main() -> Result<()> {
         .add_column_family("counters")
         .open()?;
 
-    let counters = db.collection::<Counter>("counters")?;
+    let counters = Counter::collection(&db)?;
 
     // Shared transaction across threads
     {

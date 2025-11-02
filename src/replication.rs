@@ -681,7 +681,9 @@ impl ReplicationManager {
                     let existing_value = existing_data.unwrap_or_default();
 
                     if self.hooks.is_empty() {
-                        warn!("Custom conflict resolution set but no hook registered, defaulting to LastWriteWins");
+                        warn!(
+                            "Custom conflict resolution set but no hook registered, defaulting to LastWriteWins"
+                        );
                     } else {
                         for hook in &self.hooks {
                             debug!("Applying custom conflict resolution hook");

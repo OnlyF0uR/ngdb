@@ -3,7 +3,7 @@
 //! This module provides a high-performance, thread-safe RocksDB wrapper with zero async overhead.
 //! All operations are synchronous and leverage RocksDB's internal thread-safety.
 
-use crate::{serialization::helpers, traits::KeyType, Error, Result, Storable};
+use crate::{Error, Result, Storable, serialization::helpers, traits::KeyType};
 use rocksdb::{BoundColumnFamily, WriteBatch as RocksWriteBatch};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -548,7 +548,7 @@ impl<T: Storable> Collection<T> {
     /// #     fn key(&self) -> u64 { self.id }
     /// # }
     /// # impl Referable for Post {
-    /// #     fn resolve_refs(&mut self, _db: &ngdb::Database) -> ngdb::Result<()> { Ok(()) }
+    /// #     fn resolve_all(&mut self, _db: &ngdb::Database) -> ngdb::Result<()> { Ok(()) }
     /// # }
     /// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
     /// # struct Comment { id: u64, text: String, post: Ref<Post> }
@@ -557,8 +557,8 @@ impl<T: Storable> Collection<T> {
     /// #     fn key(&self) -> u64 { self.id }
     /// # }
     /// # impl Referable for Comment {
-    /// #     fn resolve_refs(&mut self, db: &ngdb::Database) -> ngdb::Result<()> {
-    /// #         self.post.resolve_from_db(db, "posts")?;
+    /// #     fn resolve_all(&mut self, db: &ngdb::Database) -> ngdb::Result<()> {
+    /// #         self.post.resolve(db, "posts")?;
     /// #         Ok(())
     /// #     }
     /// # }
@@ -580,7 +580,7 @@ impl<T: Storable> Collection<T> {
         match self.db.get_cf(&cf, key_bytes)? {
             Some(value_bytes) => {
                 let mut value: T = helpers::deserialize(&value_bytes)?;
-                value.resolve_refs(db)?;
+                value.resolve_all(db)?;
                 Ok(Some(value))
             }
             None => Ok(None),
@@ -682,7 +682,7 @@ impl<T: Storable> Collection<T> {
             match result {
                 Ok(Some(value_bytes)) => {
                     let mut value: T = helpers::deserialize(&value_bytes)?;
-                    value.resolve_refs(db)?;
+                    value.resolve_all(db)?;
                     output.push(Some(value));
                 }
                 Ok(None) => output.push(None),

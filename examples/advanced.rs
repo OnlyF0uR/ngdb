@@ -1,9 +1,8 @@
 //! Advanced example demonstrating batches, snapshots, and iterations
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use ngdb::{DatabaseConfig, IterationStatus, Result, Storable};
+use ngdb::{DatabaseConfig, IterationStatus, Result, Storable, ngdb};
 
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[ngdb("records")]
 struct Record {
     id: u64,
     value: String,
@@ -22,7 +21,7 @@ fn main() -> Result<()> {
         .add_column_family("records")
         .open()?;
 
-    let records = db.collection::<Record>("records")?;
+    let records = Record::collection(&db)?;
 
     // Batch operations - efficient bulk writes
     let mut batch = records.batch();

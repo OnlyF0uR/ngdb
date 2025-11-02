@@ -16,10 +16,9 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use ngdb::{Database, DatabaseConfig, Storable};
-//! use borsh::{BorshSerialize, BorshDeserialize};
+//! use ngdb::{DatabaseConfig, Storable, ngdb};
 //!
-//! #[derive(Debug, BorshSerialize, BorshDeserialize)]
+//! #[ngdb("users")]
 //! struct User {
 //!     id: u64,
 //!     name: String,
@@ -28,7 +27,6 @@
 //!
 //! impl Storable for User {
 //!     type Key = u64;
-//!
 //!     fn key(&self) -> Self::Key {
 //!         self.id
 //!     }
@@ -40,17 +38,14 @@
 //!         .add_column_family("users")
 //!         .open()?;
 //!
-//!     // Get a typed collection for users
-//!     let users = db.collection::<User>("users")?;
-//!
 //!     let user = User {
 //!         id: 1,
 //!         name: "Alice".to_string(),
 //!         email: "alice@example.com".to_string(),
 //!     };
+//!     user.save(&db)?;
 //!
-//!     users.put(&user)?;
-//!
+//!     let users = User::collection(&db)?;
 //!     let retrieved: Option<User> = users.get(&1)?;
 //!     println!("Retrieved: {:?}", retrieved);
 //!
@@ -170,6 +165,9 @@ pub use replication::{
 };
 pub use serialization::{BincodeCodec, Codec};
 pub use traits::{KeyType, Storable};
+
+// Re-export attribute macro
+pub use ngdb_derive::ngdb;
 
 /// Re-export commonly used types
 pub mod prelude {
