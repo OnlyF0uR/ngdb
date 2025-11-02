@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ngdb = "1.0"
+ngdb = "2.0.0"
 borsh = { version = "1.5", features = ["derive"] }
 ```
 
