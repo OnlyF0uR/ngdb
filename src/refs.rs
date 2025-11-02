@@ -19,10 +19,10 @@
 //!
 //! ```rust,ignore
 //! use ngdb::{Storable, Referable, Ref, Database, Result};
-//! use bincode::{Encode, Decode};
+//! use borsh::{BorshSerialize, BorshDeserialize};
 //!
 //! // Define a User type
-//! #[derive(Debug, Encode, Decode)]
+//! #[derive(Debug, BorshSerialize, BorshDeserialize)]
 //! struct User {
 //!     id: u64,
 //!     name: String,
@@ -106,7 +106,8 @@
 //! - **Performance**: Each reference resolution requires a database lookup
 
 use crate::{Database, Error, Result, Storable};
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
+use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 
 /// A reference to another `Storable` object.
@@ -119,9 +120,9 @@ use std::ops::{Deref, DerefMut};
 ///
 /// ```rust,ignore
 /// use ngdb::{Storable, Ref, Referable};
-/// use bincode::{Encode, Decode};
+/// use borsh::{BorshSerialize, BorshDeserialize};
 ///
-/// #[derive(Debug, Encode, Decode)]
+/// #[derive(Debug, BorshSerialize, BorshDeserialize)]
 /// struct Post {
 ///     id: u64,
 ///     title: String,
@@ -251,43 +252,18 @@ impl<T: Storable> DerefMut for Ref<T> {
     }
 }
 
-// Custom Encode implementation - only serialize the key
-impl<T: Storable> Encode for Ref<T> {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        self.key.encode(encoder)
+// Custom BorshSerialize implementation - only serialize the key
+impl<T: Storable> BorshSerialize for Ref<T> {
+    fn serialize<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.key.serialize(writer)
     }
 }
 
-// Custom Decode implementation - only deserialize the key
-// We need to implement for generic Context to work with bincode's derive macro
-impl<T, Context> Decode<Context> for Ref<T>
-where
-    T: Storable,
-    T::Key: Decode<Context>,
-{
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        // Decode only the key, value remains None
-        let key = T::Key::decode(decoder)?;
-        Ok(Ref { key, value: None })
-    }
-}
-
-// Implement BorrowDecode for Ref<T> to support bincode derive macros
-impl<'de, T, Context> bincode::BorrowDecode<'de, Context> for Ref<T>
-where
-    T: Storable,
-    T::Key: Decode<Context>,
-{
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        // For BorrowDecode, we still just decode the key
-        let key = T::Key::decode(decoder)?;
+// Custom BorshDeserialize implementation - only deserialize the key
+impl<T: Storable> BorshDeserialize for Ref<T> {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        // Deserialize only the key, value remains None
+        let key = T::Key::deserialize_reader(reader)?;
         Ok(Ref { key, value: None })
     }
 }
@@ -302,9 +278,9 @@ where
 ///
 /// ```rust,ignore
 /// use ngdb::{Storable, Referable, Ref, Database, Result};
-/// use bincode::{Encode, Decode};
+/// use borsh::{BorshSerialize, BorshDeserialize};
 ///
-/// #[derive(Encode, Decode)]
+/// #[derive(BorshSerialize, BorshDeserialize)]
 /// struct User {
 ///     id: u64,
 ///     name: String,
@@ -322,7 +298,7 @@ where
 ///     }
 /// }
 ///
-/// #[derive(Encode, Decode)]
+/// #[derive(BorshSerialize, BorshDeserialize)]
 /// struct Post {
 ///     id: u64,
 ///     title: String,
@@ -354,10 +330,11 @@ pub trait Referable: Storable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use borsh::{BorshDeserialize, BorshSerialize};
 
     #[test]
     fn test_ref_creation() {
-        #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
         struct TestType {
             id: u64,
             value: String,
@@ -379,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_ref_from_value() {
-        #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
         struct TestType {
             id: u64,
             value: String,
@@ -403,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_ref_deref() {
-        #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
         struct TestType {
             id: u64,
             value: String,
@@ -429,9 +406,7 @@ mod tests {
 
     #[test]
     fn test_ref_encode_decode() {
-        use bincode::config;
-
-        #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
         struct TestType {
             id: u64,
             value: String,
@@ -445,9 +420,8 @@ mod tests {
         }
 
         let reference = Ref::<TestType>::new(42);
-        let encoded = bincode::encode_to_vec(&reference, config::standard()).unwrap();
-        let (decoded, _): (Ref<TestType>, usize) =
-            bincode::decode_from_slice(&encoded, config::standard()).unwrap();
+        let encoded = borsh::to_vec(&reference).unwrap();
+        let decoded: Ref<TestType> = borsh::from_slice(&encoded).unwrap();
 
         assert_eq!(reference.key(), decoded.key());
         // Decoded reference is not resolved, so .get() should return an error
@@ -457,7 +431,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Attempted to access unresolved reference")]
     fn test_ref_deref_panics_when_unresolved() {
-        #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
         struct TestType {
             id: u64,
             value: String,

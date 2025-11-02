@@ -112,24 +112,16 @@ impl From<rocksdb::Error> for Error {
     }
 }
 
-// Convert from io::Error to our Error type
+// Convert from io::Error to our Error type (borsh also uses std::io::Error)
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        Error::Io(err)
-    }
-}
-
-// Convert from bincode 2.0 encode error to our Error type
-impl From<bincode::error::EncodeError> for Error {
-    fn from(err: bincode::error::EncodeError) -> Self {
-        Error::Serialization(format!("Bincode encode error: {}", err))
-    }
-}
-
-// Convert from bincode 2.0 decode error to our Error type
-impl From<bincode::error::DecodeError> for Error {
-    fn from(err: bincode::error::DecodeError) -> Self {
-        Error::Deserialization(format!("Bincode decode error: {}", err))
+        // Check if this is a deserialization error (borsh returns InvalidData)
+        match err.kind() {
+            std::io::ErrorKind::InvalidData => {
+                Error::Deserialization(format!("Borsh decode error: {}", err))
+            }
+            _ => Error::Io(err),
+        }
     }
 }
 

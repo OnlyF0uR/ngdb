@@ -4,47 +4,46 @@
 //! pluggable codecs for encoding/decoding values.
 
 use crate::{Error, Result};
-use bincode::{config, Decode, Encode};
-
-// Type alias for bincode decode context - bincode 2.0 uses () as the context type
-type BincodeConfig = ();
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Trait for encoding and decoding values to/from bytes.
 ///
 /// This abstraction allows for different serialization formats to be used
-/// with NGDB, though bincode is the default and recommended choice for
+/// with NGDB, though Borsh is the default and recommended choice for
 /// performance and compatibility.
 pub trait Codec: Send + Sync + 'static {
     /// Serialize a value to bytes
-    fn encode<T: Encode>(&self, value: &T) -> Result<Vec<u8>>;
+    fn encode<T: BorshSerialize>(&self, value: &T) -> Result<Vec<u8>>;
 
     /// Deserialize bytes to a value
-    fn decode<T: Decode<BincodeConfig>>(&self, bytes: &[u8]) -> Result<T>;
+    fn decode<T: BorshDeserialize>(&self, bytes: &[u8]) -> Result<T>;
 }
 
-/// Bincode-based codec implementation (default)
+/// Borsh-based codec implementation (default)
 ///
-/// Bincode is a compact, fast binary serialization format that works
+/// Borsh is a compact, fast binary serialization format that works
 /// excellently for database storage.
+///
+/// Note: This struct is named `BincodeCodec` for backward compatibility,
+/// but it uses Borsh serialization internally.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BincodeCodec;
 
 impl BincodeCodec {
-    /// Create a new BincodeCodec instance
+    /// Create a new BincodeCodec instance (uses Borsh serialization)
     pub fn new() -> Self {
         Self
     }
 }
 
 impl Codec for BincodeCodec {
-    fn encode<T: Encode>(&self, value: &T) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(value, config::standard())
+    fn encode<T: BorshSerialize>(&self, value: &T) -> Result<Vec<u8>> {
+        borsh::to_vec(value)
             .map_err(|e| Error::Serialization(format!("Failed to serialize value: {}", e)))
     }
 
-    fn decode<T: Decode<BincodeConfig>>(&self, bytes: &[u8]) -> Result<T> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _len)| value)
+    fn decode<T: BorshDeserialize>(&self, bytes: &[u8]) -> Result<T> {
+        borsh::from_slice(bytes)
             .map_err(|e| Error::Deserialization(format!("Failed to deserialize value: {}", e)))
     }
 }
@@ -53,18 +52,17 @@ impl Codec for BincodeCodec {
 pub mod helpers {
     use super::*;
 
-    /// Serialize a value using bincode
+    /// Serialize a value using borsh
     #[inline]
-    pub fn serialize<T: Encode>(value: &T) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(value, config::standard())
+    pub fn serialize<T: BorshSerialize>(value: &T) -> Result<Vec<u8>> {
+        borsh::to_vec(value)
             .map_err(|e| Error::Serialization(format!("Serialization failed: {}", e)))
     }
 
-    /// Deserialize a value using bincode
+    /// Deserialize a value using borsh
     #[inline]
-    pub fn deserialize<T: Decode<BincodeConfig>>(bytes: &[u8]) -> Result<T> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _len)| value)
+    pub fn deserialize<T: BorshDeserialize>(bytes: &[u8]) -> Result<T> {
+        borsh::from_slice(bytes)
             .map_err(|e| Error::Deserialization(format!("Deserialization failed: {}", e)))
     }
 }
@@ -72,8 +70,9 @@ pub mod helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use borsh::{BorshDeserialize, BorshSerialize};
 
-    #[derive(Debug, PartialEq, Encode, Decode)]
+    #[derive(Debug, PartialEq, BorshSerialize, BorshDeserialize)]
     struct TestStruct {
         id: u64,
         name: String,

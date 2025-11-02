@@ -1,9 +1,9 @@
 //! Comprehensive replication example demonstrating conflict resolution and node coordination
 
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{DatabaseConfig, Result, Storable};
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct Record {
     id: u64,
     value: String,

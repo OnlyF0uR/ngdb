@@ -16,9 +16,9 @@
 //!
 //! ```rust,no_run
 //! use ngdb::{Database, DatabaseConfig, Storable};
-//! use bincode::{Decode, Encode};
+//! use borsh::{BorshSerialize, BorshDeserialize};
 //!
-//! #[derive(Debug, Encode, Decode)]
+//! #[derive(Debug, BorshSerialize, BorshDeserialize)]
 //! struct User {
 //!     id: u64,
 //!     name: String,
@@ -61,8 +61,8 @@
 //!
 //! ```rust,no_run
 //! # use ngdb::{Database, Storable};
-//! # use bincode::{Decode, Encode};
-//! # #[derive(Encode, Decode)]
+//! # use borsh::{BorshSerialize, BorshDeserialize};
+//! # #[derive(BorshSerialize, BorshDeserialize)]
 //! # struct User { id: u64, name: String }
 //! # impl Storable for User {
 //! #     type Key = u64;
@@ -84,8 +84,8 @@
 //!
 //! ```rust,no_run
 //! # use ngdb::{Database, Storable};
-//! # use bincode::{Decode, Encode};
-//! # #[derive(Encode, Decode)]
+//! # use borsh::{BorshSerialize, BorshDeserialize};
+//! # #[derive(BorshSerialize, BorshDeserialize)]
 //! # struct Account { id: u64, balance: i64 }
 //! # impl Storable for Account {
 //! #     type Key = u64;
@@ -127,15 +127,15 @@ pub mod prelude {
         BackupInfo, Collection, Database, DatabaseConfig, Error, IterationStatus, Ref, Referable,
         Result, Storable, Transaction,
     };
-    pub use bincode::{Decode, Encode};
+    pub use borsh::{BorshDeserialize, BorshSerialize};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bincode::{Decode, Encode};
+    use borsh::{BorshDeserialize, BorshSerialize};
 
-    #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+    #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
     struct TestData {
         id: u64,
         value: String,

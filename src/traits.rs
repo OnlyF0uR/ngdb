@@ -4,10 +4,7 @@
 //! work seamlessly with NGDB.
 
 use crate::{Error, Result};
-use bincode::{config, Decode, Encode};
-
-// Type alias for bincode decode context - bincode 2.0 uses () as the context type
-type BincodeConfig = ();
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// The core trait that types must implement to be stored in NGDB.
 ///
@@ -18,9 +15,9 @@ type BincodeConfig = ();
 ///
 /// ```rust
 /// use ngdb::Storable;
-/// use bincode::{Decode, Encode};
+/// use borsh::{BorshSerialize, BorshDeserialize};
 ///
-/// #[derive(Encode, Decode)]
+/// #[derive(BorshSerialize, BorshDeserialize)]
 /// struct User {
 ///     id: u64,
 ///     name: String,
@@ -35,7 +32,7 @@ type BincodeConfig = ();
 ///     }
 /// }
 /// ```
-pub trait Storable: Encode + Decode<BincodeConfig> + Sized {
+pub trait Storable: BorshSerialize + BorshDeserialize + Sized {
     /// The key type for this storable type.
     /// Common types: u64, String, (u64, String), etc.
     type Key: KeyType;
@@ -61,7 +58,7 @@ pub trait Storable: Encode + Decode<BincodeConfig> + Sized {
 ///
 /// This trait is automatically implemented for common key types.
 pub trait KeyType:
-    Encode + Decode<BincodeConfig> + Clone + Send + Sync + std::fmt::Debug + 'static
+    BorshSerialize + BorshDeserialize + Clone + Send + Sync + std::fmt::Debug + 'static
 {
     /// Convert the key to bytes for storage.
     fn to_bytes(&self) -> Result<Vec<u8>>;
@@ -75,121 +72,101 @@ pub trait KeyType:
 
 impl KeyType for u8 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for u16 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for u32 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for u64 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for u128 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for i8 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for i16 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for i32 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for i64 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
 impl KeyType for i128 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
@@ -221,13 +198,11 @@ where
     B: KeyType,
 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
@@ -238,13 +213,11 @@ where
     C: KeyType,
 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 
@@ -256,13 +229,11 @@ where
     D: KeyType,
 {
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::encode_to_vec(self, config::standard()).map_err(Into::into)
+        borsh::to_vec(self).map_err(Into::into)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bincode::decode_from_slice(bytes, config::standard())
-            .map(|(value, _)| value)
-            .map_err(Into::into)
+        borsh::from_slice(bytes).map_err(Into::into)
     }
 }
 

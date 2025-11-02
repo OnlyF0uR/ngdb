@@ -1,9 +1,9 @@
 //! Backup and restore example demonstrating disaster recovery capabilities
 
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{Database, DatabaseConfig, Result, Storable};
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct User {
     id: u64,
     name: String,
@@ -18,7 +18,7 @@ impl Storable for User {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct Post {
     id: u64,
     user_id: u64,

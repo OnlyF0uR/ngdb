@@ -1,6 +1,6 @@
 [package]
 name = "ngdb"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["OnlyF0uR"]
 license = "MIT OR Apache-2.0"
@@ -11,7 +11,7 @@ categories = ["database"]
 
 [dependencies]
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "multi-threaded-cf"] }
-bincode = { version = "2.0", features = ["derive"] }
+borsh = { version = "1.5", features = ["derive"] }
 tracing = "0.1"
 
 [target.'cfg(not(windows))'.dependencies.rocksdb]

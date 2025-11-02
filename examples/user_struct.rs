@@ -1,9 +1,9 @@
 //! User struct example demonstrating custom types with validation
 
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{DatabaseConfig, Result, Storable};
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
 struct User {
     id: u64,
     username: String,

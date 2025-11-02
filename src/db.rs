@@ -25,9 +25,9 @@ use tracing::{debug, error, info, instrument, warn};
 ///
 /// ```rust,no_run
 /// use ngdb::{Database, DatabaseConfig, Storable};
-/// use bincode::{Decode, Encode};
+/// use borsh::{BorshSerialize, BorshDeserialize};
 ///
-/// #[derive(Encode, Decode)]
+/// #[derive(BorshSerialize, BorshDeserialize)]
 /// struct User {
 ///     id: u64,
 ///     name: String,
@@ -92,7 +92,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// # use ngdb::{Database, Storable};
-    /// # #[derive(bincode::Encode, bincode::Decode)]
+    /// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
     /// # struct User { id: u64 }
     /// # impl Storable for User {
     /// #     type Key = u64;
@@ -298,7 +298,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// # use ngdb::{Database, Storable};
-    /// # #[derive(bincode::Encode, bincode::Decode)]
+    /// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
     /// # struct Account { id: u64, balance: i64 }
     /// # impl Storable for Account {
     /// #     type Key = u64;
@@ -453,7 +453,7 @@ impl<T: Storable> Collection<T> {
     ///
     /// ```rust,no_run
     /// # use ngdb::{Collection, Storable};
-    /// # #[derive(bincode::Encode, bincode::Decode)]
+    /// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
     /// # struct User { id: u64, name: String }
     /// # impl Storable for User {
     /// #     type Key = u64;
@@ -541,7 +541,7 @@ impl<T: Storable> Collection<T> {
     ///
     /// ```rust,no_run
     /// # use ngdb::{Collection, Database, Storable, Referable, Ref};
-    /// # #[derive(bincode::Encode, bincode::Decode)]
+    /// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
     /// # struct Post { id: u64, title: String }
     /// # impl Storable for Post {
     /// #     type Key = u64;
@@ -550,7 +550,7 @@ impl<T: Storable> Collection<T> {
     /// # impl Referable for Post {
     /// #     fn resolve_refs(&mut self, _db: &ngdb::Database) -> ngdb::Result<()> { Ok(()) }
     /// # }
-    /// # #[derive(bincode::Encode, bincode::Decode)]
+    /// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
     /// # struct Comment { id: u64, text: String, post: Ref<Post> }
     /// # impl Storable for Comment {
     /// #     type Key = u64;
@@ -1167,7 +1167,7 @@ impl<T: Storable> Iterator<T> {
 ///
 /// ```rust,no_run
 /// # use ngdb::{Database, Storable};
-/// # #[derive(bincode::Encode, bincode::Decode)]
+/// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
 /// # struct Account { id: u64, balance: i64 }
 /// # impl Storable for Account {
 /// #     type Key = u64;
@@ -1662,12 +1662,12 @@ unsafe impl<'txn, T: Storable> Sync for TransactionCollection<'txn, T> {}
 
 #[cfg(test)]
 mod tests {
-    use bincode::{Decode, Encode};
+    use borsh::{BorshDeserialize, BorshSerialize};
 
     use super::*;
     use crate::DatabaseConfig;
 
-    #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+    #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
     struct TestItem {
         id: u64,
         data: String,

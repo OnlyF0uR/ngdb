@@ -1,9 +1,9 @@
 //! Basic replication example demonstrating replication log creation and processing
 
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{DatabaseConfig, Result, Storable};
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct Document {
     id: u64,
     title: String,

@@ -1,9 +1,9 @@
 //! Advanced example demonstrating batches, snapshots, and iterations
 
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{DatabaseConfig, IterationStatus, Result, Storable};
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct Record {
     id: u64,
     value: String,

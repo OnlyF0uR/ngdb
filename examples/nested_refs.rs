@@ -3,7 +3,7 @@
 //! Demonstrates how to use `Ref<T>` to create relationships between objects
 //! with automatic reference resolution.
 
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{Database, DatabaseConfig, Ref, Referable, Result, Storable};
 
 // ============================================================================
@@ -11,7 +11,7 @@ use ngdb::{Database, DatabaseConfig, Ref, Referable, Result, Storable};
 // ============================================================================
 
 /// A user in the system
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct User {
     id: u64,
     name: String,
@@ -33,7 +33,7 @@ impl Referable for User {
 }
 
 /// A blog post that references a User as the author
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct Post {
     id: u64,
     title: String,
@@ -58,7 +58,7 @@ impl Referable for Post {
 }
 
 /// A comment that references both a User and a Post
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct Comment {
     id: u64,
     text: String,

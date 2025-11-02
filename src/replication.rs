@@ -31,7 +31,7 @@
 //! ```
 
 use crate::{Database, Error, Result};
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, instrument, warn};
@@ -39,7 +39,7 @@ use tracing::{debug, error, info, instrument, warn};
 /// A replication log entry representing a database operation
 ///
 /// This is what you send to peer nodes when replicating data.
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ReplicationLog {
     /// Unique identifier for this operation
     pub operation_id: String,
@@ -58,7 +58,7 @@ pub struct ReplicationLog {
 }
 
 /// Types of operations that can be replicated
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum ReplicationOperation {
     /// Put operation
     Put {
@@ -88,7 +88,7 @@ pub enum ReplicationOperation {
 }
 
 /// Individual operation within a batch
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum BatchOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },

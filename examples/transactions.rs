@@ -1,9 +1,9 @@
 //! Transaction example demonstrating atomic operations across multiple writes
 
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use ngdb::{DatabaseConfig, Result, Storable};
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct Account {
     id: u64,
     name: String,
