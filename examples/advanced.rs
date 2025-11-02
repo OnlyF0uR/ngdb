@@ -67,16 +67,16 @@ fn main() -> Result<()> {
 
     // Iteration
     println!("\nIteration:");
-    let count = records.iter().count()?;
+    let count = records.iter()?.count()?;
     println!("  Total records: {}", count);
 
     // Collect all into vector
-    let all = records.iter().collect_all()?;
+    let all = records.iter()?.collect_all()?;
     println!("  Collected {} records", all.len());
 
     // Iterate with callback
     let mut found = 0;
-    let status = records.iter().for_each(|record| {
+    let status = records.iter()?.for_each(|record| {
         if record.id % 10 == 0 {
             found += 1;
         }

@@ -195,10 +195,8 @@ fn main() -> Result<()> {
     let ids = vec![1, 2, 3];
     let resolved_comments = comments.get_many_with_refs(&ids, &db)?;
 
-    for comment_opt in resolved_comments {
-        if let Some(comment) = comment_opt {
-            println!("   - '{}' by {}", comment.text, comment.author.name);
-        }
+    for comment in resolved_comments.into_iter().flatten() {
+        println!("   - '{}' by {}", comment.text, comment.author.name);
     }
 
     println!("\n=== Example completed successfully! ===");

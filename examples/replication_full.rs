@@ -141,9 +141,9 @@ fn main() -> Result<()> {
     // Example 5: Verify consistency
     println!("Example 5: Consistency verification");
     {
-        let node1_count = node1_records.iter().count()?;
-        let node2_count = node2_records.iter().count()?;
-        let node3_count = node3_records.iter().count()?;
+        let node1_count = node1_records.iter()?.count()?;
+        let node2_count = node2_records.iter()?.count()?;
+        let node3_count = node3_records.iter()?.count()?;
 
         println!("Node 1 records: {}", node1_count);
         println!("Node 2 records: {}", node2_count);
@@ -226,7 +226,7 @@ fn main() -> Result<()> {
 
     // Final state
     println!("Final state:");
-    let final_count = node1_records.iter().count()?;
+    let final_count = node1_records.iter()?.count()?;
     println!("Total records across cluster: {}", final_count);
 
     // Cleanup

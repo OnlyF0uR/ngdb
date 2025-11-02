@@ -97,7 +97,7 @@ fn main() -> Result<()> {
 
     // Iterate over all users
     println!("All users:");
-    users.iter().for_each(|user| {
+    users.iter()?.for_each(|user| {
         let status = if user.active { "active" } else { "inactive" };
         println!("  {} - {} ({})", user.username, user.email, status);
         true
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
     println!("Deleted user 1");
 
     // Statistics
-    let count = users.iter().count()?;
+    let count = users.iter()?.count()?;
     println!("Final user count: {}", count);
 
     db.shutdown()?;

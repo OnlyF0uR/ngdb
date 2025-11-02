@@ -79,7 +79,7 @@ fn main() -> Result<()> {
 
     // Iterate over all items
     println!("All products:");
-    products.iter().for_each(|p| {
+    products.iter()?.for_each(|p| {
         println!("  {}: ${}", p.name, p.price);
         true
     })?;
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
     println!("Deleted product 2");
 
     // Get statistics
-    let count = products.iter().count()?;
+    let count = products.iter()?.count()?;
     println!("Total products: {}", count);
 
     // Flush and shutdown

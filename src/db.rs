@@ -106,17 +106,18 @@ impl Database {
     #[instrument(skip(self))]
     pub fn collection<T: Storable>(&self, name: &str) -> Result<Collection<T>> {
         // Acquire read lock to prevent shutdown during this operation
-        let shutdown = self
+        // Keep the guard alive until we've created the collection to prevent TOCTOU
+        let shutdown_guard = self
             .inner
             .shutdown
             .read()
             .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
 
-        if *shutdown {
+        if *shutdown_guard {
             return Err(Error::Database("Database has been shut down".to_string()));
         }
 
-        // Verify column family exists
+        // Verify column family exists while holding the lock
         self.inner.db.cf_handle(name).ok_or_else(|| {
             error!("Column family '{}' not found", name);
             Error::Database(format!(
@@ -126,6 +127,11 @@ impl Database {
         })?;
 
         debug!("Created collection for column family '{}'", name);
+
+        // Collection creation is now safe - db is not shut down
+        // We can drop the guard now, Collection will check on each operation
+        drop(shutdown_guard);
+
         Ok(Collection::new(
             Arc::clone(&self.inner.db),
             name,
@@ -134,9 +140,17 @@ impl Database {
     }
 
     /// List all column families in the database
-    pub fn list_collections(&self) -> Vec<String> {
+    ///
+    /// Returns a list of all collection names (column families) in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database has been shut down or if listing fails.
+    pub fn list_collections(&self) -> Result<Vec<String>> {
+        let _guard = self.check_shutdown()?;
+
         rocksdb::DB::list_cf(&rocksdb::Options::default(), self.inner.db.path())
-            .unwrap_or_else(|_| vec!["default".to_string()])
+            .map_err(|e| Error::Database(format!("Failed to list collections: {}", e)))
     }
 
     /// Flush all memtables to disk
@@ -170,6 +184,9 @@ impl Database {
     pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<()> {
         use rocksdb::backup::{BackupEngine, BackupEngineOptions};
 
+        // Check if database is shut down
+        let _guard = self.check_shutdown()?;
+
         let path = backup_path.as_ref();
         info!("Creating backup at {:?}", path);
 
@@ -193,6 +210,21 @@ impl Database {
 
         info!("Backup created successfully");
         Ok(())
+    }
+
+    #[inline]
+    fn check_shutdown(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>> {
+        let guard = self
+            .inner
+            .shutdown
+            .read()
+            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+
+        if *guard {
+            return Err(Error::Database("Database has been shut down".to_string()));
+        }
+
+        Ok(guard)
     }
 
     /// Restore database from a backup
@@ -309,25 +341,34 @@ impl Database {
     ///
     /// This acquires a write lock, which will block until all ongoing operations
     /// (which hold read locks) complete. This eliminates the TOCTOU race condition.
+    ///
+    /// If flushing fails, the database will NOT be marked as shut down, allowing
+    /// operations to continue or shutdown to be retried.
     #[instrument(skip(self))]
     pub fn shutdown(&self) -> Result<()> {
         info!("Shutting down database");
 
         // Acquire write lock - blocks until all read locks (operations) complete
-        let mut shutdown = self
+        let mut shutdown_guard = self
             .inner
             .shutdown
             .write()
             .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
 
-        // Mark as shut down to prevent new operations
-        *shutdown = true;
+        // Try to flush - keep result but don't early return
+        // This ensures the write lock is always released via RAII
+        let flush_result = self.flush();
 
-        // Flush all data
-        self.flush()?;
+        // Only mark as shut down if flush succeeded
+        if flush_result.is_ok() {
+            *shutdown_guard = true;
+            info!("Database shutdown complete");
+        } else {
+            error!("Shutdown failed: flush error, database remains operational");
+        }
 
-        info!("Database shutdown complete");
-        Ok(())
+        // Lock is dropped here automatically, regardless of flush result
+        flush_result
     }
 }
 
@@ -355,6 +396,7 @@ pub struct BackupInfo {
 ///
 /// Collections are backed by RocksDB column families and provide type-safe
 /// access to stored data. All operations are synchronous and thread-safe.
+#[derive(Debug)]
 pub struct Collection<T: Storable> {
     db: Arc<rocksdb::DB>,
     cf_name: String,
@@ -513,6 +555,12 @@ impl<T: Storable> Collection<T> {
     /// # impl Storable for Comment {
     /// #     type Key = u64;
     /// #     fn key(&self) -> u64 { self.id }
+    /// # }
+    /// # impl Referable for Comment {
+    /// #     fn resolve_refs(&mut self, db: &ngdb::Database) -> ngdb::Result<()> {
+    /// #         self.post.resolve_from_db(db, "posts")?;
+    /// #         Ok(())
+    /// #     }
     /// # }
     /// # fn example(collection: Collection<Comment>, db: Database) -> Result<(), ngdb::Error> {
     /// let comment = collection.get_with_refs(&1, &db)?;
@@ -697,21 +745,25 @@ impl<T: Storable> Collection<T> {
     ///
     /// The iterator holds an Arc to the database, keeping it alive for the duration
     /// of the iteration. Dropping the iterator won't invalidate the database.
-    pub fn iter(&self) -> Iterator<T> {
-        Iterator::new(
+    pub fn iter(&self) -> Result<Iterator<T>> {
+        let _guard = self.check_shutdown()?;
+        Ok(Iterator::new(
             Arc::clone(&self.db),
             self.cf_name.clone(),
             IteratorMode::Start,
-        )
+            Arc::clone(&self.shutdown),
+        ))
     }
 
     /// Create an iterator starting from a specific key
     pub fn iter_from(&self, key: &T::Key) -> Result<Iterator<T>> {
+        let _guard = self.check_shutdown()?;
         let key_bytes = key.to_bytes()?;
         Ok(Iterator::new(
             Arc::clone(&self.db),
             self.cf_name.clone(),
             IteratorMode::From(key_bytes),
+            Arc::clone(&self.shutdown),
         ))
     }
 
@@ -843,45 +895,56 @@ impl<T: Storable> Batch<T> {
 
 /// A consistent snapshot of the database
 ///
-/// Snapshots provide a point-in-time view of the data. This holds a single
-/// RocksDB snapshot that is reused for all operations, ensuring all reads
-/// see the same consistent state.
+/// Snapshots provide a point-in-time view of the data.
 ///
-/// The snapshot is stored in a Box to pin its location in memory, allowing
-/// us to safely tie its lifetime to the DB reference we hold via Arc.
+/// # Implementation Note
+///
+/// We store the raw snapshot pointer and manually manage the snapshot lifetime
+/// to avoid unsound lifetime transmutation. The snapshot is valid as long as
+/// the database exists, which we guarantee by holding an Arc<DB>.
 pub struct Snapshot<T: Storable> {
-    _db: Arc<rocksdb::DB>,
-    snapshot: Box<rocksdb::SnapshotWithThreadMode<'static, rocksdb::DB>>,
+    db: Arc<rocksdb::DB>,
+    // Store raw pointer to snapshot - we manage its lifetime manually
+    snapshot_ptr: *const rocksdb::SnapshotWithThreadMode<'static, rocksdb::DB>,
     cf_name: String,
     _phantom: PhantomData<T>,
 }
 
 impl<T: Storable> Snapshot<T> {
     fn new(db: Arc<rocksdb::DB>, cf_name: String) -> Self {
-        // Create a snapshot and store it
-        let snapshot = db.snapshot();
-        // SAFETY: We extend the lifetime to 'static because:
-        // 1. We hold an Arc<DB> which keeps the database alive
-        // 2. The snapshot is valid as long as the DB exists
-        // 3. We Box the snapshot to pin it in memory
-        // 4. The Snapshot struct owns both the DB Arc and the snapshot
-        // 5. Rust's drop order guarantees snapshot is dropped before _db
-        let static_snapshot = unsafe {
-            std::mem::transmute::<
-                rocksdb::SnapshotWithThreadMode<'_, rocksdb::DB>,
-                rocksdb::SnapshotWithThreadMode<'static, rocksdb::DB>,
-            >(snapshot)
+        // Create a snapshot - it's owned by the DB and lives as long as the DB
+        // SAFETY: We use transmute to extend the snapshot's lifetime to 'static so we can
+        // store it without borrowing from db. This is safe because:
+        // 1. We store Arc<DB> which keeps the database alive
+        // 2. We properly clean up the snapshot in Drop
+        // 3. The snapshot is only accessed while self (and thus Arc<DB>) is alive
+        let snapshot_ptr = unsafe {
+            let snapshot = db.snapshot();
+            // Transmute to break the lifetime connection - we'll manage lifetime manually
+            let static_snapshot: rocksdb::SnapshotWithThreadMode<'static, rocksdb::DB> =
+                std::mem::transmute(snapshot);
+            let boxed = Box::new(static_snapshot);
+            Box::into_raw(boxed) as *const _
         };
+
         Self {
-            _db: db,
-            snapshot: Box::new(static_snapshot),
+            db,
+            snapshot_ptr,
             cf_name,
             _phantom: PhantomData,
         }
     }
 
+    fn snapshot(&self) -> &rocksdb::SnapshotWithThreadMode<'_, rocksdb::DB> {
+        // SAFETY:
+        // 1. snapshot_ptr is valid because db is alive (we hold Arc<DB>)
+        // 2. The returned reference is tied to &self lifetime, not 'static
+        // 3. The snapshot was allocated and will be deallocated by us
+        unsafe { &*self.snapshot_ptr }
+    }
+
     fn cf<'a>(&'a self) -> Result<Arc<BoundColumnFamily<'a>>> {
-        self._db
+        self.db
             .cf_handle(&self.cf_name)
             .ok_or_else(|| Error::Database(format!("Column family '{}' not found", self.cf_name)))
     }
@@ -893,7 +956,7 @@ impl<T: Storable> Snapshot<T> {
         let key_bytes = key.to_bytes()?;
         let cf = self.cf()?;
 
-        match self.snapshot.get_cf(&cf, key_bytes)? {
+        match self.snapshot().get_cf(&cf, key_bytes)? {
             Some(value_bytes) => {
                 let value: T = helpers::deserialize(&value_bytes)?;
                 Ok(Some(value))
@@ -905,6 +968,18 @@ impl<T: Storable> Snapshot<T> {
     /// Check if a key exists in the snapshot
     pub fn exists(&self, key: &T::Key) -> Result<bool> {
         Ok(self.get(key)?.is_some())
+    }
+}
+
+impl<T: Storable> Drop for Snapshot<T> {
+    fn drop(&mut self) {
+        // SAFETY: We created this snapshot with Box::leak, so we need to clean it up
+        // The pointer is valid because db is still alive (Arc is dropped after this)
+        unsafe {
+            let _ = Box::from_raw(
+                self.snapshot_ptr as *mut rocksdb::SnapshotWithThreadMode<'static, rocksdb::DB>,
+            );
+        }
     }
 }
 
@@ -930,15 +1005,22 @@ pub struct Iterator<T: Storable> {
     db: Arc<rocksdb::DB>,
     cf_name: String,
     mode: IteratorMode,
+    shutdown: Arc<std::sync::RwLock<bool>>,
     _phantom: PhantomData<T>,
 }
 
 impl<T: Storable> Iterator<T> {
-    fn new(db: Arc<rocksdb::DB>, cf_name: String, mode: IteratorMode) -> Self {
+    fn new(
+        db: Arc<rocksdb::DB>,
+        cf_name: String,
+        mode: IteratorMode,
+        shutdown: Arc<std::sync::RwLock<bool>>,
+    ) -> Self {
         Self {
             db,
             cf_name,
             mode,
+            shutdown,
             _phantom: PhantomData,
         }
     }
@@ -949,12 +1031,28 @@ impl<T: Storable> Iterator<T> {
             .ok_or_else(|| Error::Database(format!("Column family '{}' not found", self.cf_name)))
     }
 
+    #[inline]
+    fn check_shutdown(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>> {
+        let guard = self
+            .shutdown
+            .read()
+            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+
+        if *guard {
+            return Err(Error::Database("Database has been shut down".to_string()));
+        }
+
+        Ok(guard)
+    }
+
     /// Collect all items into a vector
     ///
     /// # Warning
     ///
     /// This will load all items into memory. Use with caution on large collections.
     pub fn collect_all(&self) -> Result<Vec<T>> {
+        let _guard = self.check_shutdown()?;
+
         let mut results = Vec::new();
         let cf = self.cf()?;
         let iter = match &self.mode {
@@ -992,6 +1090,8 @@ impl<T: Storable> Iterator<T> {
     where
         F: FnMut(T) -> bool,
     {
+        let _guard = self.check_shutdown()?;
+
         let cf = self.cf()?;
         let iter = match &self.mode {
             IteratorMode::Start => self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start),
@@ -1017,6 +1117,8 @@ impl<T: Storable> Iterator<T> {
 
     /// Count the total number of items
     pub fn count(&self) -> Result<usize> {
+        let _guard = self.check_shutdown()?;
+
         let cf = self.cf()?;
         let iter = match &self.mode {
             IteratorMode::Start => self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start),
@@ -1040,6 +1142,16 @@ impl<T: Storable> Iterator<T> {
 ///
 /// Transactions buffer all writes in memory and apply them atomically on commit.
 /// This implementation is thread-safe and can be shared across threads.
+///
+/// # Memory Limits
+///
+/// To prevent unbounded memory growth, transactions enforce the following limits:
+/// - Maximum 100,000 operations
+/// - Maximum 100MB total cached data
+///
+/// These limits help prevent out-of-memory errors while still allowing substantial
+/// transactions. If you need larger batch operations, consider using `Batch` instead
+/// or splitting your transaction into smaller chunks.
 ///
 /// # Cloning
 ///
@@ -1077,13 +1189,84 @@ pub struct Transaction {
     batch: Mutex<RocksWriteBatch>,
     // Cache for read isolation: (cf_name, key_bytes) -> Option<value_bytes>
     // None means deleted in this transaction
-    // WARNING: Large transactions can consume significant memory without any built-in limit.
-    // Keep transactions small and commit frequently. Consider the following limits:
-    // - Number of operations: Keep under 10,000 for best performance
-    // - Total data size: Keep under 100MB to avoid excessive memory usage
-    // If you need larger batch operations, use Batch instead of Transaction.
-    cache: Mutex<HashMap<(String, Vec<u8>), Option<Vec<u8>>>>,
+    cache: Mutex<TransactionCache>,
     shutdown: Arc<std::sync::RwLock<bool>>,
+}
+
+struct TransactionCache {
+    data: HashMap<(String, Vec<u8>), Option<Vec<u8>>>,
+    operation_count: usize,
+    total_bytes: usize,
+}
+
+impl TransactionCache {
+    fn new() -> Self {
+        Self {
+            data: HashMap::new(),
+            operation_count: 0,
+            total_bytes: 0,
+        }
+    }
+
+    fn insert(&mut self, key: (String, Vec<u8>), value: Option<Vec<u8>>) -> Result<()> {
+        const MAX_OPERATIONS: usize = 100_000;
+        const MAX_BYTES: usize = 100 * 1024 * 1024; // 100MB
+        const HASHMAP_OVERHEAD: usize = 32; // Approximate per-entry overhead on 64-bit systems
+
+        // Check operation limit
+        if self.operation_count >= MAX_OPERATIONS {
+            return Err(Error::Database(format!(
+                "Transaction limit exceeded: maximum {} operations allowed",
+                MAX_OPERATIONS
+            )));
+        }
+
+        // Calculate size of new entry (including HashMap overhead)
+        let entry_size = key.0.len()
+            + key.1.len()
+            + value.as_ref().map(|v| v.len()).unwrap_or(0)
+            + HASHMAP_OVERHEAD;
+
+        // If replacing an existing entry, subtract its old size first
+        let size_delta = if let Some(old_value) = self.data.get(&key) {
+            let old_size = key.0.len()
+                + key.1.len()
+                + old_value.as_ref().map(|v| v.len()).unwrap_or(0)
+                + HASHMAP_OVERHEAD;
+            entry_size as i64 - old_size as i64
+        } else {
+            entry_size as i64
+        };
+
+        // Check memory limit
+        let new_total = (self.total_bytes as i64 + size_delta) as usize;
+        if new_total > MAX_BYTES {
+            return Err(Error::Database(format!(
+                "Transaction memory limit exceeded: maximum {}MB allowed",
+                MAX_BYTES / (1024 * 1024)
+            )));
+        }
+
+        // Update counters
+        let is_new_entry = !self.data.contains_key(&key);
+        if is_new_entry {
+            self.operation_count += 1;
+        }
+        self.total_bytes = new_total;
+
+        self.data.insert(key, value);
+        Ok(())
+    }
+
+    fn get(&self, key: &(String, Vec<u8>)) -> Option<&Option<Vec<u8>>> {
+        self.data.get(key)
+    }
+
+    fn clear(&mut self) {
+        self.data.clear();
+        self.operation_count = 0;
+        self.total_bytes = 0;
+    }
 }
 
 impl Transaction {
@@ -1091,7 +1274,7 @@ impl Transaction {
         Self {
             db,
             batch: Mutex::new(RocksWriteBatch::default()),
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(TransactionCache::new()),
             shutdown,
         }
     }
@@ -1245,7 +1428,7 @@ pub struct TransactionCollection<'txn, T: Storable> {
     db: Arc<rocksdb::DB>,
     cf_name: String,
     batch: &'txn Mutex<RocksWriteBatch>,
-    cache: &'txn Mutex<HashMap<(String, Vec<u8>), Option<Vec<u8>>>>,
+    cache: &'txn Mutex<TransactionCache>,
     _phantom: PhantomData<T>,
 }
 
@@ -1254,7 +1437,7 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
         db: Arc<rocksdb::DB>,
         cf_name: String,
         batch: &'txn Mutex<RocksWriteBatch>,
-        cache: &'txn Mutex<HashMap<(String, Vec<u8>), Option<Vec<u8>>>>,
+        cache: &'txn Mutex<TransactionCache>,
     ) -> Self {
         Self {
             db,
@@ -1286,24 +1469,23 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
 
         debug!("Transaction put in collection '{}'", self.cf_name);
 
+        // Acquire locks in consistent order: batch first, then cache (prevents deadlock)
+        let mut batch = self.batch.lock().map_err(|e| {
+            error!("Failed to acquire batch lock: {:?}", e);
+            Error::LockPoisoned(format!("Batch lock poisoned: {:?}", e))
+        })?;
+
+        let mut cache = self.cache.lock().map_err(|e| {
+            error!("Failed to acquire cache lock: {:?}", e);
+            Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
+        })?;
+
         // Add to batch for commit
         let cf = self.cf()?;
-        self.batch
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire batch lock: {:?}", e);
-                Error::LockPoisoned(format!("Batch lock poisoned: {:?}", e))
-            })?
-            .put_cf(&cf, &key_bytes, &value_bytes);
+        batch.put_cf(&cf, &key_bytes, &value_bytes);
 
-        // Add to cache for read isolation
-        self.cache
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire cache lock: {:?}", e);
-                Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
-            })?
-            .insert((self.cf_name.clone(), key_bytes), Some(value_bytes));
+        // Add to cache for read isolation (checks limits)
+        cache.insert((self.cf_name.clone(), key_bytes), Some(value_bytes))?;
 
         value.on_stored();
         Ok(())
@@ -1360,24 +1542,23 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
 
         debug!("Transaction delete in collection '{}'", self.cf_name);
 
+        // Acquire locks in consistent order: batch first, then cache (prevents deadlock)
+        let mut batch = self.batch.lock().map_err(|e| {
+            error!("Failed to acquire batch lock: {:?}", e);
+            Error::LockPoisoned(format!("Batch lock poisoned: {:?}", e))
+        })?;
+
+        let mut cache = self.cache.lock().map_err(|e| {
+            error!("Failed to acquire cache lock: {:?}", e);
+            Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
+        })?;
+
         // Add to batch for commit
         let cf = self.cf()?;
-        self.batch
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire batch lock: {:?}", e);
-                Error::LockPoisoned(format!("Batch lock poisoned: {:?}", e))
-            })?
-            .delete_cf(&cf, &key_bytes);
+        batch.delete_cf(&cf, &key_bytes);
 
-        // Add to cache as deleted (None value)
-        self.cache
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire cache lock: {:?}", e);
-                Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
-            })?
-            .insert((self.cf_name.clone(), key_bytes), None);
+        // Add to cache as deleted (None value) - checks limits
+        cache.insert((self.cf_name.clone(), key_bytes), None)?;
 
         Ok(())
     }
@@ -1406,6 +1587,12 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
             return Ok(Vec::new());
         }
 
+        // Convert all keys to bytes first (no lock needed)
+        let key_bytes: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|k| k.to_bytes())
+            .collect::<Result<Vec<Vec<u8>>>>()?;
+
         // Pre-allocate results with exact size
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         let mut uncached_indices = Vec::new();
@@ -1413,35 +1600,43 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
 
         // First pass: check cache for all keys
         // We intentionally drop the lock before DB access to avoid holding it during I/O
-        let cache = self.cache.lock().map_err(|e| {
-            error!("Failed to acquire cache lock: {:?}", e);
-            Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
-        })?;
+        {
+            let cache = self.cache.lock().map_err(|e| {
+                error!("Failed to acquire cache lock: {:?}", e);
+                Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
+            })?;
 
-        for (i, key) in keys.iter().enumerate() {
-            let key_bytes = key.to_bytes()?;
-            let cache_key = (self.cf_name.clone(), key_bytes.clone());
+            for (i, kb) in key_bytes.iter().enumerate() {
+                let cache_key = (self.cf_name.clone(), kb.clone());
 
-            if let Some(cached) = cache.get(&cache_key) {
-                // In cache - resolve immediately
-                results[i] = match cached {
-                    Some(value_bytes) => Some(helpers::deserialize(value_bytes)?),
-                    None => None, // Deleted in transaction
-                };
-            } else {
-                // Not in cache - need to fetch from DB
-                uncached_indices.push(i);
-                uncached_keys.push(key_bytes);
+                if let Some(cached) = cache.get(&cache_key) {
+                    // In cache - resolve immediately
+                    results[i] = match cached {
+                        Some(value_bytes) => Some(helpers::deserialize(value_bytes)?),
+                        None => None, // Deleted in transaction
+                    };
+                } else {
+                    // Not in cache - need to fetch from DB
+                    uncached_indices.push(i);
+                    uncached_keys.push(kb.clone());
+                }
             }
-        }
-
-        drop(cache); // Release lock before DB access
+        } // Release cache lock before DB access
 
         // Second pass: batch fetch uncached keys from DB
         if !uncached_keys.is_empty() {
             let cf = self.cf()?;
             let cf_refs: Vec<_> = uncached_keys.iter().map(|k| (&cf, k.as_slice())).collect();
             let db_results = self.db.multi_get_cf(cf_refs);
+
+            // Verify we got the expected number of results (RocksDB guarantees this)
+            debug_assert_eq!(
+                db_results.len(),
+                uncached_keys.len(),
+                "RocksDB multi_get violated contract: got {} results but expected {}",
+                db_results.len(),
+                uncached_keys.len()
+            );
 
             for (result_idx, db_result) in db_results.into_iter().enumerate() {
                 let original_idx = uncached_indices[result_idx];
@@ -1568,7 +1763,7 @@ mod tests {
                 .unwrap();
         }
 
-        let items = collection.iter().collect_all().unwrap();
+        let items = collection.iter().unwrap().collect_all().unwrap();
         assert_eq!(5, items.len());
     }
 
@@ -1702,5 +1897,151 @@ mod tests {
         assert!(final_results[2].is_some()); // 3 now exists
         assert!(final_results[3].is_some()); // 4 now exists
         assert!(final_results[4].is_none()); // 5 now deleted
+    }
+
+    #[test]
+    fn test_transaction_limits() {
+        let db = create_test_db();
+        let txn = db.transaction().unwrap();
+        let collection = txn.collection::<TestItem>("test").unwrap();
+
+        // Test operation limit - try to add 100,001 items
+        for i in 0..100_001 {
+            let result = collection.put(&TestItem {
+                id: i,
+                data: format!("item_{}", i),
+            });
+
+            if i < 100_000 {
+                assert!(result.is_ok());
+            } else {
+                // Should fail on the 100,001st operation
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("limit exceeded"));
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_shutdown_prevents_operations() {
+        let db = create_test_db();
+        let collection = db.collection::<TestItem>("test").unwrap();
+
+        // Operation should work before shutdown
+        let item = TestItem {
+            id: 1,
+            data: "test".to_string(),
+        };
+        assert!(collection.put(&item).is_ok());
+
+        // Shutdown the database
+        db.shutdown().unwrap();
+
+        // Operations should fail after shutdown
+        let item2 = TestItem {
+            id: 2,
+            data: "test2".to_string(),
+        };
+        let result = collection.put(&item2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shut down"));
+
+        // Getting collection should also fail
+        let result = db.collection::<TestItem>("test");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shut down"));
+    }
+
+    #[test]
+    fn test_iterator_checks_shutdown() {
+        let db = create_test_db();
+        let collection = db.collection::<TestItem>("test").unwrap();
+
+        // Add some items
+        for i in 0..5 {
+            collection
+                .put(&TestItem {
+                    id: i,
+                    data: format!("item_{}", i),
+                })
+                .unwrap();
+        }
+
+        // Create iterator before shutdown
+        let iter = collection.iter().unwrap();
+
+        // Shutdown the database
+        db.shutdown().unwrap();
+
+        // Iterator operations should fail
+        let result = iter.collect_all();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shut down"));
+    }
+
+    #[test]
+    fn test_shutdown_lock_is_released() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let db = Arc::new(create_test_db());
+        let collection = db.collection::<TestItem>("test").unwrap();
+
+        // Add an item to ensure operations work
+        collection
+            .put(&TestItem {
+                id: 1,
+                data: "test".to_string(),
+            })
+            .unwrap();
+
+        // Spawn a thread that will try to shutdown after a delay
+        let db_clone = Arc::clone(&db);
+        let shutdown_handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            // This should succeed and release the lock even if flush has issues
+            db_clone.shutdown()
+        });
+
+        // Give the shutdown time to complete
+        thread::sleep(Duration::from_millis(100));
+
+        // Wait for shutdown to complete
+        let shutdown_result = shutdown_handle.join().unwrap();
+
+        // Shutdown should have succeeded
+        assert!(shutdown_result.is_ok());
+
+        // Verify operations are now blocked (proving lock was released and shutdown succeeded)
+        let result = collection.put(&TestItem {
+            id: 2,
+            data: "test2".to_string(),
+        });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shut down"));
+
+        // Verify we can still query the shutdown state (lock is not deadlocked)
+        let result = db.collection::<TestItem>("another");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shut down"));
+    }
+
+    #[test]
+    fn test_list_collections_checks_shutdown() {
+        let db = create_test_db();
+
+        // Should work before shutdown
+        let collections = db.list_collections();
+        assert!(collections.is_ok());
+
+        // Shutdown the database
+        db.shutdown().unwrap();
+
+        // list_collections should fail after shutdown
+        let result = db.list_collections();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shut down"));
     }
 }

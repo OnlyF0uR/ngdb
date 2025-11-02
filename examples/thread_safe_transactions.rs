@@ -119,7 +119,7 @@ fn main() -> Result<()> {
 
     // Example 4: Iteration status tracking
     println!("Example 4: Iteration");
-    let status = counters.iter().for_each(|counter| {
+    let status = counters.iter()?.for_each(|counter| {
         // Stop iteration early at value >= 1000
         counter.value < 1000
     })?;
@@ -130,7 +130,7 @@ fn main() -> Result<()> {
     }
 
     // Final state
-    let count = counters.iter().count()?;
+    let count = counters.iter()?.count()?;
     println!("\nTotal counters: {}", count);
 
     db.shutdown()?;

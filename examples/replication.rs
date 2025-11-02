@@ -102,8 +102,8 @@ fn main() -> Result<()> {
     // Example 4: Count verification
     println!("Example 4: Final state");
     {
-        let primary_count = primary_docs.iter().count()?;
-        let replica_count = replica_docs.iter().count()?;
+        let primary_count = primary_docs.iter()?.count()?;
+        let replica_count = replica_docs.iter()?.count()?;
 
         println!("Primary documents: {}", primary_count);
         println!("Replica documents: {}", replica_count);

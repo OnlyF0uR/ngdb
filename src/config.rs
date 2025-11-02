@@ -31,37 +31,7 @@ pub struct DatabaseConfig {
     max_write_buffer_number: Option<i32>,
     enable_statistics: bool,
     optimize_for_point_lookup: Option<u64>,
-    compression_type: CompressionType,
     column_families: HashSet<String>,
-}
-
-/// Compression type for database
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
-pub enum CompressionType {
-    None,
-    Snappy,
-    Zlib,
-    Bz2,
-    #[default]
-    Lz4,
-    Lz4hc,
-    Zstd,
-}
-
-
-impl CompressionType {
-    fn to_rocksdb(&self) -> rocksdb::DBCompressionType {
-        match self {
-            CompressionType::None => rocksdb::DBCompressionType::None,
-            CompressionType::Snappy => rocksdb::DBCompressionType::Snappy,
-            CompressionType::Zlib => rocksdb::DBCompressionType::Zlib,
-            CompressionType::Bz2 => rocksdb::DBCompressionType::Bz2,
-            CompressionType::Lz4 => rocksdb::DBCompressionType::Lz4,
-            CompressionType::Lz4hc => rocksdb::DBCompressionType::Lz4hc,
-            CompressionType::Zstd => rocksdb::DBCompressionType::Zstd,
-        }
-    }
 }
 
 impl DatabaseConfig {
@@ -85,7 +55,6 @@ impl DatabaseConfig {
             max_write_buffer_number: None,
             enable_statistics: false,
             optimize_for_point_lookup: None,
-            compression_type: CompressionType::default(),
             column_families,
         }
     }
@@ -143,12 +112,6 @@ impl DatabaseConfig {
     /// This is useful when the workload is primarily Get() operations
     pub fn optimize_for_point_lookup(mut self, block_cache_size_mb: u64) -> Self {
         self.optimize_for_point_lookup = Some(block_cache_size_mb);
-        self
-    }
-
-    /// Set the compression type for the database
-    pub fn set_compression_type(mut self, compression: CompressionType) -> Self {
-        self.compression_type = compression;
         self
     }
 
@@ -235,7 +198,8 @@ impl DatabaseConfig {
             opts.optimize_for_point_lookup(block_cache_size_mb);
         }
 
-        opts.set_compression_type(self.compression_type.to_rocksdb());
+        // Use LZ4 compression (only feature enabled in Cargo.toml)
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Check if database exists
         let db_exists = self.path.exists();
@@ -257,7 +221,8 @@ impl DatabaseConfig {
             .iter()
             .map(|name| {
                 let mut cf_opts = rocksdb::Options::default();
-                cf_opts.set_compression_type(self.compression_type.to_rocksdb());
+                // Use LZ4 compression (only feature enabled in Cargo.toml)
+                cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
                 rocksdb::ColumnFamilyDescriptor::new(name, cf_opts)
             })
             .collect();
@@ -270,8 +235,7 @@ impl DatabaseConfig {
 }
 
 /// Additional options for advanced database configuration
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     /// List of peer nodes for future replication
     pub peer_nodes: Vec<String>,
@@ -282,7 +246,6 @@ pub struct OpenOptions {
     /// Node identifier for this instance
     pub node_id: Option<String>,
 }
-
 
 impl OpenOptions {
     /// Create new open options
@@ -336,13 +299,6 @@ mod tests {
         assert!(config.create_if_missing);
         assert_eq!(config.max_open_files, Some(500));
         assert_eq!(config.parallelism, Some(2));
-    }
-
-    #[test]
-    fn test_compression_types() {
-        let config = DatabaseConfig::new("/tmp/test").set_compression_type(CompressionType::Zstd);
-
-        assert_eq!(config.compression_type, CompressionType::Zstd);
     }
 
     #[test]

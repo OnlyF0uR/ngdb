@@ -64,8 +64,8 @@ fn print_counts(db: &Database) -> Result<()> {
     let users = db.collection::<User>("users")?;
     let posts = db.collection::<Post>("posts")?;
 
-    let user_count = users.iter().count()?;
-    let post_count = posts.iter().count()?;
+    let user_count = users.iter()?.count()?;
+    let post_count = posts.iter()?.count()?;
 
     println!("Database: {} users, {} posts", user_count, post_count);
     Ok(())
@@ -166,7 +166,7 @@ fn main() -> Result<()> {
 
         let user6_exists = users.exists(&6)?;
         let user1_exists = users.exists(&1)?;
-        let post_count = posts.iter().count()?;
+        let post_count = posts.iter()?.count()?;
 
         println!("User 6 exists: {}", user6_exists);
         println!("User 1 exists: {}", user1_exists);

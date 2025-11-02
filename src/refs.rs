@@ -424,7 +424,7 @@ mod tests {
 
         // Test transparent access via Deref
         assert_eq!((*reference).value, "test");
-        assert_eq!((*reference).id, 42);
+        assert_eq!(reference.id, 42);
     }
 
     #[test]

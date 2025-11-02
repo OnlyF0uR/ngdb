@@ -111,7 +111,7 @@ mod serialization;
 mod traits;
 
 // Public API exports
-pub use config::{CompressionType, DatabaseConfig, OpenOptions};
+pub use config::{DatabaseConfig, OpenOptions};
 pub use db::{
     BackupInfo, Batch, Collection, Database, IterationStatus, Iterator, Snapshot, Transaction,
     TransactionCollection,
