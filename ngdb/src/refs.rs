@@ -69,7 +69,7 @@
 //! // Retrieve with automatic reference resolution
 //! let posts = Post::collection(&db)?;
 //! let post = posts.get_with_refs(&1, &db)?.unwrap();
-//! println!("Author: {}", post.author.get()?.name);  // Safe access!
+//! println!("Author: {}", post.author.get()?.name);
 //! ```
 //!
 //! # Nested References
@@ -144,7 +144,7 @@ use std::io::{Read, Write};
 ///
 /// // After get_with_refs():
 /// let post = posts.get_with_refs(&1, &db)?.unwrap();
-/// println!("Author: {}", post.author.get()?.name); // Safe access!
+/// println!("Author: {}", post.author.get()?.name);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ref<T: Storable> {
