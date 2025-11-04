@@ -13,6 +13,7 @@ use syn::{Data, DeriveInput, Fields, Lit, Type, parse_macro_input};
 /// - Generates `collection_name()` method that returns the collection name
 /// - Generates `collection(&Database)` method that returns the typed collection
 /// - Generates `save(&self, db: &Database)` method for saving to the database
+/// - Generates `delete(&self, db: &Database)` method for deleting from the database
 /// - Implements `Referable` trait with automatic `resolve_all()`
 ///
 /// # Usage
@@ -45,6 +46,7 @@ use syn::{Data, DeriveInput, Fields, Lit, Type, parse_macro_input};
 ///
 /// // Now you can use:
 /// post.save(&db)?;                    // Save to database
+/// post.delete(&db)?;                  // Delete from database
 /// Post::collection_name()             // Returns "posts"
 /// let posts = Post::collection(&db)?; // Get typed collection
 /// // resolve_all() is automatically generated to resolve the author reference
@@ -118,7 +120,7 @@ pub fn ngdb(attr: TokenStream, item: TokenStream) -> TokenStream {
     let resolve_statements = ref_fields.iter().map(|(field_name, inner_type)| {
         quote! {
             self.#field_name.resolve(db, <#inner_type>::collection_name())?;
-            if let Ok(resolved) = self.#field_name.get_mut() {
+            if let Ok(resolved) = self.#field_name.get_mut(db) {
                 resolved.resolve_all(db)?;
             }
         }
@@ -150,6 +152,23 @@ pub fn ngdb(attr: TokenStream, item: TokenStream) -> TokenStream {
             {
                 let collection = Self::collection(db)?;
                 collection.put(self)
+            }
+
+            /// Delete this object from the database
+            ///
+            /// This is a convenience method that gets the collection and calls delete().
+            pub fn delete(&self, db: &::ngdb::Database) -> ::ngdb::Result<()>
+            where
+                Self: ::ngdb::Storable,
+            {
+                let collection = Self::collection(db)?;
+                collection.delete(&self.key())
+            }
+        }
+
+        impl #impl_generics ::ngdb::HasCollectionName for #name #ty_generics #where_clause {
+            fn collection_name() -> &'static str {
+                #collection_name
             }
         }
 

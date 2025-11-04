@@ -174,10 +174,13 @@ impl Storable for Post {
 }
 
 // The #[ngdb] macro automatically implements Referable
-// Retrieve with automatic reference resolution
+// Retrieve post - references are not yet resolved
 let posts = Post::collection(&db)?;
-let post = posts.get_with_refs(&1, &db)?.unwrap();
-println!("Author: {}", post.author.get()?.name);
+let mut post = posts.get(&1)?.unwrap();
+
+// Call .get(&db) to automatically resolve the author reference
+let author = post.author.get(&db)?;
+println!("Author: {}", author.name);
 ```
 
 ## Distributed Replication

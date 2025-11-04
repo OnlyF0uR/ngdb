@@ -158,7 +158,7 @@ pub use db::{
     TransactionCollection,
 };
 pub use error::{Error, Result};
-pub use refs::{Ref, Referable};
+pub use refs::{HasCollectionName, Ref, Referable};
 pub use replication::{
     BatchOp, ConflictResolution, ReplicationConfig, ReplicationHook, ReplicationLog,
     ReplicationManager, ReplicationOperation, ReplicationStats,
@@ -173,8 +173,8 @@ pub use ngdb_macros::ngdb;
 pub mod prelude {
     pub use crate::{
         BackupInfo, Collection, ConflictResolution, Database, DatabaseConfig, Error,
-        IterationStatus, Ref, Referable, ReplicationConfig, ReplicationLog, ReplicationManager,
-        ReplicationOperation, Result, Storable, Transaction,
+        HasCollectionName, IterationStatus, Ref, Referable, ReplicationConfig, ReplicationLog,
+        ReplicationManager, ReplicationOperation, Result, Storable, Transaction,
     };
 
     pub use ngdb_macros::ngdb;

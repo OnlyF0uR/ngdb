@@ -4,14 +4,14 @@
 //! `Storable` objects. When a struct contains `Ref<T>`, only the key is stored,
 //! and the referenced object is automatically fetched during retrieval.
 //!
-//! After resolution, you can access the referenced value via `.get()`:
-//! `post.author.get()?.name` for safe access with error propagation
+//! You can access the referenced value via `.get(&db)` which automatically resolves
+//! the reference on-demand, or use `.get_unchecked()` if already resolved.
 //!
 //! # Key Features
 //!
 //! - **Space Efficient**: Only stores keys, not full objects
-//! - **Safe Access**: Use `.get()` to access resolved references with error handling
-//! - **Automatic Resolution**: Call `get_with_refs()` to fetch and populate all references
+//! - **Safe Access**: Use `.get(&db)` for auto-resolution or `.get_unchecked()` for resolved refs
+//! - **Automatic Resolution**: References are resolved on-demand when you call `.get(&db)`
 //! - **Type Safe**: Compile-time verification of reference relationships
 //! - **Nested Support**: References can contain other references
 //! - **Attribute Macro**: Use `#[ngdb("name")]` to automatically generate all boilerplate
@@ -66,10 +66,13 @@
 //! };
 //! post.save(&db)?;
 //!
-//! // Retrieve with automatic reference resolution
+//! // Retrieve post - references are not yet resolved
 //! let posts = Post::collection(&db)?;
-//! let post = posts.get_with_refs(&1, &db)?.unwrap();
-//! println!("Author: {}", post.author.get()?.name);
+//! let mut post = posts.get(&1)?.unwrap();
+//!
+//! // Call .get(&db) to automatically resolve and access the author
+//! let author = post.author.get(&db)?;
+//! println!("Author: {}", author.name);
 //! ```
 //!
 //! # Nested References
@@ -142,9 +145,10 @@ use std::io::{Read, Write};
 ///     author: Ref<User>,
 /// }
 ///
-/// // After get_with_refs():
-/// let post = posts.get_with_refs(&1, &db)?.unwrap();
-/// println!("Author: {}", post.author.get()?.name);
+/// // Retrieve and access with automatic resolution:
+/// let mut post = posts.get(&1)?.unwrap();
+/// let author = post.author.get(&db)?;
+/// println!("Author: {}", author.name);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ref<T: Storable> {
@@ -176,39 +180,90 @@ impl<T: Storable> Ref<T> {
         &self.key
     }
 
-    /// Get the resolved value.
+    /// Get the resolved value, automatically resolving if needed.
     ///
-    /// Returns an error if the reference hasn't been resolved yet.
-    /// Use this for safe access without panicking.
+    /// This method requires mutable access because it may need to resolve
+    /// the reference from the database if it hasn't been resolved yet.
+    ///
+    /// If you know the reference is already resolved and want immutable access,
+    /// use `get_unchecked()` instead.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
+    /// // Automatic resolution - no need to call resolve() first
+    /// let author = comment.author.get(&db)?;
+    /// println!("Author: {}", author.name);
+    ///
     /// // Safe access with error handling
-    /// match comment.author.get() {
+    /// match comment.author.get(&db) {
     ///     Ok(author) => println!("Author: {}", author.name),
     ///     Err(_) => println!("Author not loaded"),
     /// }
-    ///
-    /// // Or with ?
-    /// let author = comment.author.get()?;
-    /// println!("Author: {}", author.name);
     /// ```
-    pub fn get(&self) -> Result<&T> {
+    pub fn get(&mut self, db: &Database) -> Result<&T>
+    where
+        T: Referable + HasCollectionName,
+    {
+        if self.value.is_none() {
+            self.resolve(db, T::collection_name())?;
+        }
+        self.value
+            .as_ref()
+            .map(|b| b.as_ref())
+            .ok_or_else(|| Error::InvalidValue("Reference resolution failed.".to_string()))
+    }
+
+    /// Get the resolved value without attempting to resolve it.
+    ///
+    /// This method provides immutable access to an already-resolved reference.
+    /// Returns an error if the reference hasn't been resolved yet.
+    ///
+    /// Use this when you know the reference is already resolved and need
+    /// immutable access (e.g., to avoid multiple mutable borrows).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // After calling get() once to resolve
+    /// let author = comment.author.get(&db)?;
+    ///
+    /// // Later, use get_unchecked() for immutable access
+    /// let author_name = comment.author.get_unchecked()?.name;
+    /// let author_email = comment.author.get_unchecked()?.email;
+    /// ```
+    pub fn get_unchecked(&self) -> Result<&T> {
         self.value.as_ref().map(|b| b.as_ref()).ok_or_else(|| {
             Error::InvalidValue(
-                "Reference not resolved. Use get_with_refs() to resolve references.".to_string(),
+                "Reference not resolved. Use get(&db) to resolve references.".to_string(),
             )
         })
     }
 
-    /// Get a mutable reference to the resolved value.
+    /// Get a mutable reference to the resolved value, automatically resolving if needed.
+    ///
+    /// If the reference hasn't been resolved yet, this will automatically
+    /// fetch it from the database using the type's collection name.
+    pub fn get_mut(&mut self, db: &Database) -> Result<&mut T>
+    where
+        T: Referable + HasCollectionName,
+    {
+        if self.value.is_none() {
+            self.resolve(db, T::collection_name())?;
+        }
+        self.value
+            .as_mut()
+            .map(|b| b.as_mut())
+            .ok_or_else(|| Error::InvalidValue("Reference resolution failed.".to_string()))
+    }
+
+    /// Get a mutable reference to the resolved value without attempting to resolve it.
     ///
     /// Returns an error if the reference hasn't been resolved yet.
-    pub fn get_mut(&mut self) -> Result<&mut T> {
+    pub fn get_mut_unchecked(&mut self) -> Result<&mut T> {
         self.value.as_mut().map(|b| b.as_mut()).ok_or_else(|| {
             Error::InvalidValue(
-                "Reference not resolved. Use get_with_refs() to resolve references.".to_string(),
+                "Reference not resolved. Use get_mut(&db) to resolve references.".to_string(),
             )
         })
     }
@@ -257,6 +312,15 @@ impl<T: Storable> BorshDeserialize for Ref<T> {
         let key = T::Key::deserialize_reader(reader)?;
         Ok(Ref { key, value: None })
     }
+}
+
+/// Trait for providing collection name for a type.
+///
+/// This trait is automatically implemented by the `#[ngdb]` macro.
+/// It allows generic code to access the collection name.
+pub trait HasCollectionName {
+    /// Returns the collection name for this type.
+    fn collection_name() -> &'static str;
 }
 
 /// Trait for types that can be referenced by `Ref<T>` and contain references themselves.
@@ -341,8 +405,8 @@ mod tests {
         let key = 42u64;
         let reference = Ref::<TestType>::new(key);
         assert_eq!(reference.key(), &42);
-        // Reference is not resolved, so .get() should return an error
-        assert!(reference.get().is_err());
+        // Reference value is None initially
+        assert!(reference.value.is_none());
     }
 
     #[test]
@@ -366,34 +430,9 @@ mod tests {
         };
         let reference = Ref::from_value(value.clone());
         assert_eq!(reference.key(), &42);
-        assert_eq!(reference.get().ok(), Some(&value));
-    }
-
-    #[test]
-    fn test_ref_access_via_get() {
-        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
-        struct TestType {
-            id: u64,
-            value: String,
-        }
-
-        impl Storable for TestType {
-            type Key = u64;
-            fn key(&self) -> Self::Key {
-                self.id
-            }
-        }
-
-        let value = TestType {
-            id: 42,
-            value: "test".to_string(),
-        };
-        let reference = Ref::from_value(value.clone());
-
-        // Test safe access via get()
-        let accessed = reference.get().unwrap();
-        assert_eq!(accessed.value, "test");
-        assert_eq!(accessed.id, 42);
+        // Value is cached when created with from_value
+        assert!(reference.value.is_some());
+        assert_eq!(reference.value.as_ref().unwrap().as_ref(), &value);
     }
 
     #[test]
@@ -416,26 +455,7 @@ mod tests {
         let decoded: Ref<TestType> = borsh::from_slice(&encoded).unwrap();
 
         assert_eq!(reference.key(), decoded.key());
-        // Decoded reference is not resolved, so .get() should return an error
-        assert!(decoded.get().is_err());
-    }
-
-    #[test]
-    fn test_ref_get_returns_error_when_unresolved() {
-        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
-        struct TestType {
-            id: u64,
-            value: String,
-        }
-
-        impl Storable for TestType {
-            type Key = u64;
-            fn key(&self) -> Self::Key {
-                self.id
-            }
-        }
-
-        let reference = Ref::<TestType>::new(42);
-        assert!(reference.get().is_err()); // Should return error, not panic
+        // Decoded reference is not resolved (value is None)
+        assert!(decoded.value.is_none());
     }
 }

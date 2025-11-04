@@ -80,18 +80,39 @@ fn main() -> Result<()> {
     };
     comment.save(&db)?;
 
-    // Retrieve with automatic reference resolution
     let comments = Comment::collection(&db)?;
-    let resolved = comments.get_with_refs(&1, &db)?.unwrap();
 
+    // Example 1: Using get() - references are NOT resolved automatically
+    // You must call .get(&db) on each Ref field to resolve it
+    let mut comment1 = comments.get(&1)?.unwrap();
+    println!("Comment: '{}'", comment1.text);
+
+    // Call .get(&db) to automatically resolve the author reference
+    let author = comment1.author.get(&db)?;
+    println!("Author: {} ({})", author.name, author.email);
+
+    // Call .get_mut(&db) to automatically resolve the post reference
+    let post = comment1.post.get_mut(&db)?;
+    println!("Post: '{}'", post.title);
+
+    // Nested references are also auto-resolved
+    let post_author = post.author.get(&db)?;
+    println!("Post Author: {}", post_author.name);
+
+    // Example 2: Using get_with_refs() - ALL references are resolved automatically
+    // You can use .get_unchecked() to access already-resolved references
+    let resolved = comments.get_with_refs(&1, &db)?.unwrap();
     println!("Comment: '{}'", resolved.text);
     println!(
         "Author: {} ({})",
-        resolved.author.get()?.name,
-        resolved.author.get()?.email
+        resolved.author.get_unchecked()?.name,
+        resolved.author.get_unchecked()?.email
     );
-    println!("Post: '{}'", resolved.post.get()?.title);
-    println!("Post Author: {}", resolved.post.get()?.author.get()?.name);
+    println!("Post: '{}'", resolved.post.get_unchecked()?.title);
+    println!(
+        "Post Author: {}",
+        resolved.post.get_unchecked()?.author.get_unchecked()?.name
+    );
 
     Ok(())
 }
