@@ -4,11 +4,12 @@
 //! All operations are synchronous and leverage RocksDB's internal thread-safety.
 
 use crate::{Error, Result, Storable, serialization::helpers, traits::KeyType};
+use parking_lot::{Mutex, RwLock};
 use rocksdb::{BoundColumnFamily, WriteBatch as RocksWriteBatch};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 
 /// The main database handle
@@ -60,7 +61,7 @@ pub struct Database {
 pub(crate) struct DatabaseInner {
     pub(crate) db: Arc<rocksdb::DB>,
     // RwLock for shutdown: read locks allow operations, write lock for shutdown
-    shutdown: Arc<std::sync::RwLock<bool>>,
+    shutdown: Arc<RwLock<bool>>,
 }
 
 impl Database {
@@ -69,7 +70,7 @@ impl Database {
         Self {
             inner: Arc::new(DatabaseInner {
                 db: Arc::new(db),
-                shutdown: Arc::new(std::sync::RwLock::new(false)),
+                shutdown: Arc::new(RwLock::new(false)),
             }),
         }
     }
@@ -107,11 +108,7 @@ impl Database {
     pub fn collection<T: Storable>(&self, name: &str) -> Result<Collection<T>> {
         // Acquire read lock to prevent shutdown during this operation
         // Keep the guard alive until we've created the collection to prevent TOCTOU
-        let shutdown_guard = self
-            .inner
-            .shutdown
-            .read()
-            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+        let shutdown_guard = self.inner.shutdown.read();
 
         if *shutdown_guard {
             return Err(Error::Database("Database has been shut down".to_string()));
@@ -213,12 +210,8 @@ impl Database {
     }
 
     #[inline]
-    fn check_shutdown(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>> {
-        let guard = self
-            .inner
-            .shutdown
-            .read()
-            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+    fn check_shutdown(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
+        let guard = self.inner.shutdown.read();
 
         if *guard {
             return Err(Error::Database("Database has been shut down".to_string()));
@@ -318,11 +311,7 @@ impl Database {
     #[instrument(skip(self))]
     pub fn transaction(&self) -> Result<Transaction> {
         // Acquire read lock to prevent shutdown during this operation
-        let shutdown = self
-            .inner
-            .shutdown
-            .read()
-            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+        let shutdown = self.inner.shutdown.read();
 
         if *shutdown {
             return Err(Error::Database("Database has been shut down".to_string()));
@@ -349,11 +338,7 @@ impl Database {
         info!("Shutting down database");
 
         // Acquire write lock - blocks until all read locks (operations) complete
-        let mut shutdown_guard = self
-            .inner
-            .shutdown
-            .write()
-            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+        let mut shutdown_guard = self.inner.shutdown.write();
 
         // Try to flush - keep result but don't early return
         // This ensures the write lock is always released via RAII
@@ -400,12 +385,12 @@ pub struct BackupInfo {
 pub struct Collection<T: Storable> {
     db: Arc<rocksdb::DB>,
     cf_name: String,
-    shutdown: Arc<std::sync::RwLock<bool>>,
+    shutdown: Arc<RwLock<bool>>,
     _phantom: PhantomData<T>,
 }
 
 impl<T: Storable> Collection<T> {
-    fn new(db: Arc<rocksdb::DB>, name: &str, shutdown: Arc<std::sync::RwLock<bool>>) -> Self {
+    fn new(db: Arc<rocksdb::DB>, name: &str, shutdown: Arc<RwLock<bool>>) -> Self {
         Self {
             db,
             cf_name: name.to_string(),
@@ -422,13 +407,10 @@ impl<T: Storable> Collection<T> {
     }
 
     #[inline]
-    fn check_shutdown(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>> {
+    fn check_shutdown(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
         // Acquire read lock to prevent shutdown during the operation
         // This eliminates the TOCTOU race condition
-        let guard = self
-            .shutdown
-            .read()
-            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+        let guard = self.shutdown.read();
 
         if *guard {
             return Err(Error::Database("Database has been shut down".to_string()));
@@ -1005,7 +987,7 @@ pub struct Iterator<T: Storable> {
     db: Arc<rocksdb::DB>,
     cf_name: String,
     mode: IteratorMode,
-    shutdown: Arc<std::sync::RwLock<bool>>,
+    shutdown: Arc<RwLock<bool>>,
     _phantom: PhantomData<T>,
 }
 
@@ -1014,7 +996,7 @@ impl<T: Storable> Iterator<T> {
         db: Arc<rocksdb::DB>,
         cf_name: String,
         mode: IteratorMode,
-        shutdown: Arc<std::sync::RwLock<bool>>,
+        shutdown: Arc<RwLock<bool>>,
     ) -> Self {
         Self {
             db,
@@ -1032,11 +1014,8 @@ impl<T: Storable> Iterator<T> {
     }
 
     #[inline]
-    fn check_shutdown(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>> {
-        let guard = self
-            .shutdown
-            .read()
-            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+    fn check_shutdown(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
+        let guard = self.shutdown.read();
 
         if *guard {
             return Err(Error::Database("Database has been shut down".to_string()));
@@ -1190,7 +1169,7 @@ pub struct Transaction {
     // Cache for read isolation: (cf_name, key_bytes) -> Option<value_bytes>
     // None means deleted in this transaction
     cache: Mutex<TransactionCache>,
-    shutdown: Arc<std::sync::RwLock<bool>>,
+    shutdown: Arc<RwLock<bool>>,
 }
 
 struct TransactionCache {
@@ -1270,7 +1249,7 @@ impl TransactionCache {
 }
 
 impl Transaction {
-    fn new(db: Arc<rocksdb::DB>, shutdown: Arc<std::sync::RwLock<bool>>) -> Self {
+    fn new(db: Arc<rocksdb::DB>, shutdown: Arc<RwLock<bool>>) -> Self {
         Self {
             db,
             batch: Mutex::new(RocksWriteBatch::default()),
@@ -1280,11 +1259,8 @@ impl Transaction {
     }
 
     #[inline]
-    fn check_shutdown(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>> {
-        let guard = self
-            .shutdown
-            .read()
-            .map_err(|e| Error::LockPoisoned(format!("Shutdown lock poisoned: {:?}", e)))?;
+    fn check_shutdown(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
+        let guard = self.shutdown.read();
 
         if *guard {
             return Err(Error::Database("Database has been shut down".to_string()));
@@ -1325,10 +1301,7 @@ impl Transaction {
         drop(guard); // Drop guard before moving self's fields
 
         let db = self.db;
-        let batch = self.batch.into_inner().map_err(|e| {
-            error!("Failed to acquire batch lock during commit: {:?}", e);
-            Error::LockPoisoned(format!("Batch lock poisoned during commit: {:?}", e))
-        })?;
+        let batch = self.batch.into_inner();
         let op_count = batch.len();
 
         info!("Committing transaction with {} operations", op_count);
@@ -1344,71 +1317,26 @@ impl Transaction {
     /// All operations are discarded. This is done automatically by dropping the transaction.
     #[instrument(skip(self))]
     pub fn rollback(self) -> Result<()> {
-        let op_count = self
-            .batch
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire batch lock during rollback: {:?}", e);
-                Error::LockPoisoned(format!("Batch lock poisoned during rollback: {:?}", e))
-            })?
-            .len();
+        let op_count = self.batch.lock().len();
         warn!("Rolling back transaction with {} operations", op_count);
         Ok(())
     }
 
     /// Clear all operations from the transaction
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the internal locks are poisoned (a thread panicked while holding the lock)
     pub fn clear(&self) -> Result<()> {
-        self.batch
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire batch lock: {:?}", e);
-                Error::LockPoisoned(format!("Batch lock poisoned during clear: {:?}", e))
-            })?
-            .clear();
-        self.cache
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire cache lock: {:?}", e);
-                Error::LockPoisoned(format!("Cache lock poisoned during clear: {:?}", e))
-            })?
-            .clear();
+        self.batch.lock().clear();
+        self.cache.lock().clear();
         Ok(())
     }
 
     /// Get the number of operations in the transaction
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the internal lock is poisoned (a thread panicked while holding the lock)
     pub fn len(&self) -> Result<usize> {
-        Ok(self
-            .batch
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire batch lock: {:?}", e);
-                Error::LockPoisoned(format!("Batch lock poisoned during len: {:?}", e))
-            })?
-            .len())
+        Ok(self.batch.lock().len())
     }
 
     /// Check if the transaction is empty
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the internal lock is poisoned (a thread panicked while holding the lock)
     pub fn is_empty(&self) -> Result<bool> {
-        Ok(self
-            .batch
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire batch lock: {:?}", e);
-                Error::LockPoisoned(format!("Batch lock poisoned during is_empty: {:?}", e))
-            })?
-            .is_empty())
+        Ok(self.batch.lock().is_empty())
     }
 }
 
@@ -1470,15 +1398,8 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
         debug!("Transaction put in collection '{}'", self.cf_name);
 
         // Acquire locks in consistent order: batch first, then cache (prevents deadlock)
-        let mut batch = self.batch.lock().map_err(|e| {
-            error!("Failed to acquire batch lock: {:?}", e);
-            Error::LockPoisoned(format!("Batch lock poisoned: {:?}", e))
-        })?;
-
-        let mut cache = self.cache.lock().map_err(|e| {
-            error!("Failed to acquire cache lock: {:?}", e);
-            Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
-        })?;
+        let mut batch = self.batch.lock();
+        let mut cache = self.cache.lock();
 
         // Add to batch for commit
         let cf = self.cf()?;
@@ -1501,15 +1422,7 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
 
         // Check cache first (uncommitted writes)
         let cache_key = (self.cf_name.clone(), key_bytes.clone());
-        let cached_value = self
-            .cache
-            .lock()
-            .map_err(|e| {
-                error!("Failed to acquire cache lock: {:?}", e);
-                Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
-            })?
-            .get(&cache_key)
-            .cloned();
+        let cached_value = self.cache.lock().get(&cache_key).cloned();
 
         if let Some(cached) = cached_value {
             debug!("Transaction cache hit for key in '{}'", self.cf_name);
@@ -1543,15 +1456,8 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
         debug!("Transaction delete in collection '{}'", self.cf_name);
 
         // Acquire locks in consistent order: batch first, then cache (prevents deadlock)
-        let mut batch = self.batch.lock().map_err(|e| {
-            error!("Failed to acquire batch lock: {:?}", e);
-            Error::LockPoisoned(format!("Batch lock poisoned: {:?}", e))
-        })?;
-
-        let mut cache = self.cache.lock().map_err(|e| {
-            error!("Failed to acquire cache lock: {:?}", e);
-            Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
-        })?;
+        let mut batch = self.batch.lock();
+        let mut cache = self.cache.lock();
 
         // Add to batch for commit
         let cf = self.cf()?;
@@ -1601,10 +1507,7 @@ impl<'txn, T: Storable> TransactionCollection<'txn, T> {
         // First pass: check cache for all keys
         // We intentionally drop the lock before DB access to avoid holding it during I/O
         {
-            let cache = self.cache.lock().map_err(|e| {
-                error!("Failed to acquire cache lock: {:?}", e);
-                Error::LockPoisoned(format!("Cache lock poisoned: {:?}", e))
-            })?;
+            let cache = self.cache.lock();
 
             for (i, kb) in key_bytes.iter().enumerate() {
                 let cache_key = (self.cf_name.clone(), kb.clone());

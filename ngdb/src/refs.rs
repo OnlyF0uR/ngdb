@@ -125,18 +125,21 @@
 //! - **Serialization**: Only the key is serialized, not the full object
 //! - **Caching**: First `.get()` resolves from DB, subsequent calls use cached value
 //! - **Performance**: Each reference resolution requires a database lookup (on first access)
-//! - **Thread Safety**: Uses `RefCell` (not thread-safe), don't share across threads
+//! - **Thread Safety**: Uses `parking_lot::RwLock` (thread-safe), safe to share across threads
 //! - **Attribute Macro**: Use `#[ngdb("name")]` to eliminate boilerplate and auto-add derives
 
 use crate::{Database, Error, Result, Storable};
 use borsh::{BorshDeserialize, BorshSerialize};
-use std::cell::{Ref as CellRef, RefCell, RefMut as CellRefMut};
+use parking_lot::{
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use std::io::{Read, Write};
 
 /// A reference to another `Storable` object.
 ///
 /// `Ref<T>` stores only the key of the referenced object during serialization.
-/// Uses interior mutability to enable lazy loading without requiring `&mut` access.
+/// Uses interior mutability with `parking_lot::RwLock` to enable lazy loading
+/// without requiring `&mut` access. Thread-safe and can be shared across threads.
 ///
 /// # Examples
 ///
@@ -159,11 +162,42 @@ use std::io::{Read, Write};
 /// // Subsequent calls use cached value
 /// let email = post.author.get(&db)?.email;  // No DB query
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Ref<T: Storable> {
     key: T::Key,
-    value: RefCell<Option<Box<T>>>,
+    value: RwLock<Option<Box<T>>>,
 }
+
+// Manual Clone implementation since RwLock doesn't implement Clone
+impl<T: Storable + Clone> Clone for Ref<T>
+where
+    T::Key: Clone,
+{
+    fn clone(&self) -> Self {
+        let value_guard = self.value.read();
+        let value = match value_guard.as_ref() {
+            Some(boxed) => Some(Box::new((**boxed).clone())),
+            None => None,
+        };
+        Self {
+            key: self.key.clone(),
+            value: RwLock::new(value),
+        }
+    }
+}
+
+// Manual PartialEq implementation since RwLock doesn't implement PartialEq
+impl<T: Storable + PartialEq> PartialEq for Ref<T>
+where
+    T::Key: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && *self.value.read() == *other.value.read()
+    }
+}
+
+// Manual Eq implementation
+impl<T: Storable + Eq> Eq for Ref<T> where T::Key: Eq {}
 
 impl<T: Storable> Ref<T> {
     /// Create a new reference from a key.
@@ -172,7 +206,7 @@ impl<T: Storable> Ref<T> {
     pub fn new(key: T::Key) -> Self {
         Self {
             key,
-            value: RefCell::new(None),
+            value: RwLock::new(None),
         }
     }
 
@@ -183,7 +217,7 @@ impl<T: Storable> Ref<T> {
         let key = value.key();
         Self {
             key,
-            value: RefCell::new(Some(Box::new(value))),
+            value: RwLock::new(Some(Box::new(value))),
         }
     }
 
@@ -206,7 +240,7 @@ impl<T: Storable> Ref<T> {
     /// assert!(post.author.is_resolved());   // Now resolved
     /// ```
     pub fn is_resolved(&self) -> bool {
-        self.value.borrow().is_some()
+        self.value.read().is_some()
     }
 
     /// Get the resolved value, automatically resolving if needed.
@@ -214,7 +248,7 @@ impl<T: Storable> Ref<T> {
     /// This method uses interior mutability to resolve the reference on first access.
     /// Subsequent calls return the cached value without querying the database.
     ///
-    /// Returns a `Ref` smart pointer (from `std::cell`) that ensures borrowing rules.
+    /// Returns a mapped read guard that ensures borrowing rules. Thread-safe.
     ///
     /// # Examples
     ///
@@ -233,24 +267,24 @@ impl<T: Storable> Ref<T> {
     /// let name = post.author.get(&db)?.name;
     /// let id = post.author.get(&db)?.id;
     /// ```
-    pub fn get(&self, db: &Database) -> Result<CellRef<'_, T>>
+    pub fn get(&self, db: &Database) -> Result<MappedRwLockReadGuard<'_, T>>
     where
         T: Referable + HasCollectionName,
     {
         // Resolve if not already cached
-        if self.value.borrow().is_none() {
+        if self.value.read().is_none() {
             self.resolve(db, T::collection_name())?;
         }
 
-        // Map the RefCell borrow to extract the inner value
-        Ok(CellRef::map(self.value.borrow(), |opt| {
+        // Map the RwLock read guard to extract the inner value
+        Ok(RwLockReadGuard::map(self.value.read(), |opt| {
             opt.as_ref().unwrap().as_ref()
         }))
     }
 
     /// Get a mutable reference to the resolved value, automatically resolving if needed.
     ///
-    /// Returns a `RefMut` smart pointer (from `std::cell`) that ensures borrowing rules.
+    /// Returns a mapped write guard that ensures borrowing rules. Thread-safe.
     ///
     /// # Examples
     ///
@@ -261,17 +295,17 @@ impl<T: Storable> Ref<T> {
     /// let mut author = post.author.get_mut(&db)?;
     /// author.name = "New Name".to_string();
     /// ```
-    pub fn get_mut(&self, db: &Database) -> Result<CellRefMut<'_, T>>
+    pub fn get_mut(&self, db: &Database) -> Result<MappedRwLockWriteGuard<'_, T>>
     where
         T: Referable + HasCollectionName,
     {
         // Resolve if not already cached
-        if self.value.borrow().is_none() {
+        if self.value.read().is_none() {
             self.resolve(db, T::collection_name())?;
         }
 
-        // Map the RefCell borrow to extract the inner value
-        Ok(CellRefMut::map(self.value.borrow_mut(), |opt| {
+        // Map the RwLock write guard to extract the inner value
+        Ok(RwLockWriteGuard::map(self.value.write(), |opt| {
             opt.as_mut().unwrap().as_mut()
         }))
     }
@@ -293,7 +327,7 @@ impl<T: Storable> Ref<T> {
         T: Referable,
     {
         // Check if already resolved
-        if self.value.borrow().is_some() {
+        if self.value.read().is_some() {
             return Ok(());
         }
 
@@ -301,7 +335,7 @@ impl<T: Storable> Ref<T> {
         let collection = db.collection::<T>(collection_name)?;
         match collection.get(&self.key)? {
             Some(value) => {
-                *self.value.borrow_mut() = Some(Box::new(value));
+                *self.value.write() = Some(Box::new(value));
                 Ok(())
             }
             None => Err(Error::InvalidValue(format!(
@@ -343,7 +377,7 @@ impl<T: Storable> BorshDeserialize for Ref<T> {
         let key = T::Key::deserialize_reader(reader)?;
         Ok(Ref {
             key,
-            value: RefCell::new(None),
+            value: RwLock::new(None),
         })
     }
 }
@@ -415,7 +449,7 @@ pub trait Referable: Storable {
     /// For nested references, also call `resolve_all()` on the resolved objects.
     ///
     /// This method takes `&self` instead of `&mut self` because references use
-    /// interior mutability (`RefCell`) for lazy loading.
+    /// interior mutability (`RwLock`) for lazy loading.
     fn resolve_all(&self, db: &Database) -> Result<()>;
 }
 

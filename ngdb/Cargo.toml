@@ -1,6 +1,6 @@
 [package]
 name = "ngdb"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2024"
 authors = ["OnlyF0uR"]
 license = "MIT OR Apache-2.0"
@@ -15,6 +15,7 @@ rocksdb = { version = "0.24", default-features = false, features = ["lz4", "mult
 borsh = { version = "1.5", features = ["derive"] }
 blake3 = "1.8"
 tracing = "0.1"
+parking_lot = "0.12"
 ngdb_macros = { path = "../ngdb_macros", version = "0.2.1" }
 
 [target.'cfg(not(windows))'.dependencies.rocksdb]
@@ -64,6 +65,10 @@ path = "examples/replication_full.rs"
 [[example]]
 name = "nested_refs"
 path = "examples/nested_refs.rs"
+
+[[example]]
+name = "threadsafe_refs"
+path = "examples/threadsafe_refs.rs"
 
 [[example]]
 name = "derive_macro"
