@@ -156,7 +156,7 @@ Database::restore_from_backup("./backups", "./restored")?;
 
 ### References
 
-Efficiently store object relationships:
+Efficiently store object relationships with automatic lazy loading:
 
 ```rust
 use ngdb::{Ref, ngdb};
@@ -165,7 +165,7 @@ use ngdb::{Ref, ngdb};
 struct Post {
     id: u64,
     title: String,
-    author: Ref<User>, // Only stores user ID
+    author: Ref<User>, // Only stores user ID, auto-resolves on access
 }
 
 impl Storable for Post {
@@ -174,13 +174,22 @@ impl Storable for Post {
 }
 
 // The #[ngdb] macro automatically implements Referable
-// Retrieve post - references are not yet resolved
+// Retrieve post - no mut needed!
 let posts = Post::collection(&db)?;
-let mut post = posts.get(&1)?.unwrap();
+let post = posts.get(&1)?.unwrap();  // Immutable binding
 
-// Call .get(&db) to automatically resolve the author reference
+// First call: auto-resolves from DB and caches
 let author = post.author.get(&db)?;
 println!("Author: {}", author.name);
+
+// Second call: uses cached value, no DB query
+let email = post.author.get(&db)?.email;
+println!("Email: {}", email);
+
+// Check if resolved without resolving
+if post.author.is_resolved() {
+    println!("Author is cached!");
+}
 ```
 
 ## Distributed Replication

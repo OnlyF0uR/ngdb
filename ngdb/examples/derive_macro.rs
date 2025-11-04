@@ -82,36 +82,39 @@ fn main() -> Result<()> {
 
     let comments = Comment::collection(&db)?;
 
-    // Example 1: Using get() - references are NOT resolved automatically
-    // You must call .get(&db) on each Ref field to resolve it
-    let mut comment1 = comments.get(&1)?.unwrap();
+    // Example 1: Manual reference resolution (no mut needed!)
+    // Notice: No mut needed! The new API uses interior mutability
+    let comment1 = comments.get(&1)?.unwrap();
     println!("Comment: '{}'", comment1.text);
 
-    // Call .get(&db) to automatically resolve the author reference
+    // Call .get(&db) to automatically resolve and access the author
     let author = comment1.author.get(&db)?;
     println!("Author: {} ({})", author.name, author.email);
+    drop(author); // Drop the borrow
 
-    // Call .get_mut(&db) to automatically resolve the post reference
-    let post = comment1.post.get_mut(&db)?;
+    // Access the post reference - also auto-resolves
+    let post = comment1.post.get(&db)?;
     println!("Post: '{}'", post.title);
 
-    // Nested references are also auto-resolved
+    // Nested references work seamlessly
     let post_author = post.author.get(&db)?;
     println!("Post Author: {}", post_author.name);
 
-    // Example 2: Using get_with_refs() - ALL references are resolved automatically
-    // You can use .get_unchecked() to access already-resolved references
+    // Example 2: Using get_with_refs() - ALL references are resolved upfront
     let resolved = comments.get_with_refs(&1, &db)?.unwrap();
+    println!("\nWith get_with_refs():");
     println!("Comment: '{}'", resolved.text);
+
+    // All references are already resolved, just use .get(&db) as usual
     println!(
         "Author: {} ({})",
-        resolved.author.get_unchecked()?.name,
-        resolved.author.get_unchecked()?.email
+        resolved.author.get(&db)?.name,
+        resolved.author.get(&db)?.email
     );
-    println!("Post: '{}'", resolved.post.get_unchecked()?.title);
+    println!("Post: '{}'", resolved.post.get(&db)?.title);
     println!(
         "Post Author: {}",
-        resolved.post.get_unchecked()?.author.get_unchecked()?.name
+        resolved.post.get(&db)?.author.get(&db)?.name
     );
 
     Ok(())

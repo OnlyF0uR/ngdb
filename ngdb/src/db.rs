@@ -548,7 +548,7 @@ impl<T: Storable> Collection<T> {
     /// #     fn key(&self) -> u64 { self.id }
     /// # }
     /// # impl Referable for Post {
-    /// #     fn resolve_all(&mut self, _db: &ngdb::Database) -> ngdb::Result<()> { Ok(()) }
+    /// #     fn resolve_all(&self, _db: &ngdb::Database) -> ngdb::Result<()> { Ok(()) }
     /// # }
     /// # #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
     /// # struct Comment { id: u64, text: String, post: Ref<Post> }
@@ -557,7 +557,7 @@ impl<T: Storable> Collection<T> {
     /// #     fn key(&self) -> u64 { self.id }
     /// # }
     /// # impl Referable for Comment {
-    /// #     fn resolve_all(&mut self, db: &ngdb::Database) -> ngdb::Result<()> {
+    /// #     fn resolve_all(&self, db: &ngdb::Database) -> ngdb::Result<()> {
     /// #         self.post.resolve(db, "posts")?;
     /// #         Ok(())
     /// #     }
@@ -579,7 +579,7 @@ impl<T: Storable> Collection<T> {
 
         match self.db.get_cf(&cf, key_bytes)? {
             Some(value_bytes) => {
-                let mut value: T = helpers::deserialize(&value_bytes)?;
+                let value: T = helpers::deserialize(&value_bytes)?;
                 value.resolve_all(db)?;
                 Ok(Some(value))
             }
@@ -681,7 +681,7 @@ impl<T: Storable> Collection<T> {
         for result in results {
             match result {
                 Ok(Some(value_bytes)) => {
-                    let mut value: T = helpers::deserialize(&value_bytes)?;
+                    let value: T = helpers::deserialize(&value_bytes)?;
                     value.resolve_all(db)?;
                     output.push(Some(value));
                 }

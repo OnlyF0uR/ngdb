@@ -120,7 +120,7 @@ pub fn ngdb(attr: TokenStream, item: TokenStream) -> TokenStream {
     let resolve_statements = ref_fields.iter().map(|(field_name, inner_type)| {
         quote! {
             self.#field_name.resolve(db, <#inner_type>::collection_name())?;
-            if let Ok(resolved) = self.#field_name.get_mut(db) {
+            if let Ok(resolved) = self.#field_name.get(db) {
                 resolved.resolve_all(db)?;
             }
         }
@@ -173,7 +173,7 @@ pub fn ngdb(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #impl_generics ::ngdb::Referable for #name #ty_generics #where_clause {
-            fn resolve_all(&mut self, db: &::ngdb::Database) -> ::ngdb::Result<()> {
+            fn resolve_all(&self, db: &::ngdb::Database) -> ::ngdb::Result<()> {
                 #(#resolve_statements)*
                 Ok(())
             }

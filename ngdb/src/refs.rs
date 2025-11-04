@@ -5,13 +5,14 @@
 //! and the referenced object is automatically fetched during retrieval.
 //!
 //! You can access the referenced value via `.get(&db)` which automatically resolves
-//! the reference on-demand, or use `.get_unchecked()` if already resolved.
+//! the reference on-demand without requiring mutable access to the parent struct.
 //!
 //! # Key Features
 //!
 //! - **Space Efficient**: Only stores keys, not full objects
-//! - **Safe Access**: Use `.get(&db)` for auto-resolution or `.get_unchecked()` for resolved refs
+//! - **Immutable API**: No `&mut` needed - uses interior mutability for lazy loading
 //! - **Automatic Resolution**: References are resolved on-demand when you call `.get(&db)`
+//! - **Cached**: First call resolves from DB, subsequent calls use cached value
 //! - **Type Safe**: Compile-time verification of reference relationships
 //! - **Nested Support**: References can contain other references
 //! - **Attribute Macro**: Use `#[ngdb("name")]` to automatically generate all boilerplate
@@ -66,13 +67,17 @@
 //! };
 //! post.save(&db)?;
 //!
-//! // Retrieve post - references are not yet resolved
+//! // Retrieve post - no mut needed!
 //! let posts = Post::collection(&db)?;
-//! let mut post = posts.get(&1)?.unwrap();
+//! let post = posts.get(&1)?.unwrap();  // Immutable!
 //!
 //! // Call .get(&db) to automatically resolve and access the author
-//! let author = post.author.get(&db)?;
+//! let author = post.author.get(&db)?;  // Works without mut!
 //! println!("Author: {}", author.name);
+//!
+//! // Multiple accesses use cached value - no DB queries
+//! let name = post.author.get(&db)?.name;
+//! let email = post.author.get(&db)?.email;
 //! ```
 //!
 //! # Nested References
@@ -101,12 +106,12 @@
 //!
 //! ```rust,ignore
 //! impl Referable for Post {
-//!     fn resolve_all(&mut self, db: &Database) -> Result<()> {
+//!     fn resolve_all(&self, db: &Database) -> Result<()> {
 //!         // Manually resolve individual references
 //!         self.author.resolve(db, User::collection_name())?;
 //!
-//!         // Optional: resolve nested references
-//!         if let Ok(author) = self.author.get_mut() {
+//!         // Nested references are also resolved
+//!         if let Ok(author) = self.author.get(db) {
 //!             author.resolve_all(db)?;
 //!         }
 //!         Ok(())
@@ -118,19 +123,20 @@
 //!
 //! - **Circular references are NOT supported**: Don't create cycles (A -> B -> A)
 //! - **Serialization**: Only the key is serialized, not the full object
-//! - **Error Handling**: Always use `.get()` or `.get_mut()` to access resolved references safely
-//! - **Performance**: Each reference resolution requires a database lookup
+//! - **Caching**: First `.get()` resolves from DB, subsequent calls use cached value
+//! - **Performance**: Each reference resolution requires a database lookup (on first access)
+//! - **Thread Safety**: Uses `RefCell` (not thread-safe), don't share across threads
 //! - **Attribute Macro**: Use `#[ngdb("name")]` to eliminate boilerplate and auto-add derives
 
 use crate::{Database, Error, Result, Storable};
 use borsh::{BorshDeserialize, BorshSerialize};
+use std::cell::{Ref as CellRef, RefCell, RefMut as CellRefMut};
 use std::io::{Read, Write};
 
 /// A reference to another `Storable` object.
 ///
 /// `Ref<T>` stores only the key of the referenced object during serialization.
-/// After calling `get_with_refs()`, the referenced object is automatically fetched
-/// and you can access it safely via `.get()` or `.get_mut()`.
+/// Uses interior mutability to enable lazy loading without requiring `&mut` access.
 ///
 /// # Examples
 ///
@@ -145,15 +151,18 @@ use std::io::{Read, Write};
 ///     author: Ref<User>,
 /// }
 ///
-/// // Retrieve and access with automatic resolution:
-/// let mut post = posts.get(&1)?.unwrap();
-/// let author = post.author.get(&db)?;
+/// // Retrieve and access without mut:
+/// let post = posts.get(&1)?.unwrap();  // No mut!
+/// let author = post.author.get(&db)?;  // Auto-resolves on first call
 /// println!("Author: {}", author.name);
+///
+/// // Subsequent calls use cached value
+/// let email = post.author.get(&db)?.email;  // No DB query
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ref<T: Storable> {
     key: T::Key,
-    value: Option<Box<T>>,
+    value: RefCell<Option<Box<T>>>,
 }
 
 impl<T: Storable> Ref<T> {
@@ -161,7 +170,10 @@ impl<T: Storable> Ref<T> {
     ///
     /// The referenced value will be `None` until resolved.
     pub fn new(key: T::Key) -> Self {
-        Self { key, value: None }
+        Self {
+            key,
+            value: RefCell::new(None),
+        }
     }
 
     /// Create a new reference from an object.
@@ -171,7 +183,7 @@ impl<T: Storable> Ref<T> {
         let key = value.key();
         Self {
             key,
-            value: Some(Box::new(value)),
+            value: RefCell::new(Some(Box::new(value))),
         }
     }
 
@@ -180,109 +192,116 @@ impl<T: Storable> Ref<T> {
         &self.key
     }
 
-    /// Get the resolved value, automatically resolving if needed.
+    /// Check if the reference has been resolved.
     ///
-    /// This method requires mutable access because it may need to resolve
-    /// the reference from the database if it hasn't been resolved yet.
-    ///
-    /// If you know the reference is already resolved and want immutable access,
-    /// use `get_unchecked()` instead.
+    /// Returns `true` if the value is cached, `false` if it needs to be fetched.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// // Automatic resolution - no need to call resolve() first
-    /// let author = comment.author.get(&db)?;
+    /// let post = posts.get(&1)?.unwrap();
+    /// assert!(!post.author.is_resolved());  // Not yet resolved
+    ///
+    /// let _ = post.author.get(&db)?;
+    /// assert!(post.author.is_resolved());   // Now resolved
+    /// ```
+    pub fn is_resolved(&self) -> bool {
+        self.value.borrow().is_some()
+    }
+
+    /// Get the resolved value, automatically resolving if needed.
+    ///
+    /// This method uses interior mutability to resolve the reference on first access.
+    /// Subsequent calls return the cached value without querying the database.
+    ///
+    /// Returns a `Ref` smart pointer (from `std::cell`) that ensures borrowing rules.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // No mut needed!
+    /// let post = posts.get(&1)?.unwrap();
+    ///
+    /// // First call: resolves from DB and caches
+    /// let author = post.author.get(&db)?;
     /// println!("Author: {}", author.name);
     ///
-    /// // Safe access with error handling
-    /// match comment.author.get(&db) {
-    ///     Ok(author) => println!("Author: {}", author.name),
-    ///     Err(_) => println!("Author not loaded"),
-    /// }
+    /// // Second call: uses cached value, no DB query
+    /// let email = post.author.get(&db)?.email;
+    ///
+    /// // Multiple immutable accesses work fine
+    /// let name = post.author.get(&db)?.name;
+    /// let id = post.author.get(&db)?.id;
     /// ```
-    pub fn get(&mut self, db: &Database) -> Result<&T>
+    pub fn get(&self, db: &Database) -> Result<CellRef<'_, T>>
     where
         T: Referable + HasCollectionName,
     {
-        if self.value.is_none() {
+        // Resolve if not already cached
+        if self.value.borrow().is_none() {
             self.resolve(db, T::collection_name())?;
         }
-        self.value
-            .as_ref()
-            .map(|b| b.as_ref())
-            .ok_or_else(|| Error::InvalidValue("Reference resolution failed.".to_string()))
-    }
 
-    /// Get the resolved value without attempting to resolve it.
-    ///
-    /// This method provides immutable access to an already-resolved reference.
-    /// Returns an error if the reference hasn't been resolved yet.
-    ///
-    /// Use this when you know the reference is already resolved and need
-    /// immutable access (e.g., to avoid multiple mutable borrows).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// // After calling get() once to resolve
-    /// let author = comment.author.get(&db)?;
-    ///
-    /// // Later, use get_unchecked() for immutable access
-    /// let author_name = comment.author.get_unchecked()?.name;
-    /// let author_email = comment.author.get_unchecked()?.email;
-    /// ```
-    pub fn get_unchecked(&self) -> Result<&T> {
-        self.value.as_ref().map(|b| b.as_ref()).ok_or_else(|| {
-            Error::InvalidValue(
-                "Reference not resolved. Use get(&db) to resolve references.".to_string(),
-            )
-        })
+        // Map the RefCell borrow to extract the inner value
+        Ok(CellRef::map(self.value.borrow(), |opt| {
+            opt.as_ref().unwrap().as_ref()
+        }))
     }
 
     /// Get a mutable reference to the resolved value, automatically resolving if needed.
     ///
-    /// If the reference hasn't been resolved yet, this will automatically
-    /// fetch it from the database using the type's collection name.
-    pub fn get_mut(&mut self, db: &Database) -> Result<&mut T>
+    /// Returns a `RefMut` smart pointer (from `std::cell`) that ensures borrowing rules.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let post = posts.get(&1)?.unwrap();
+    ///
+    /// // Get mutable access - auto-resolves if needed
+    /// let mut author = post.author.get_mut(&db)?;
+    /// author.name = "New Name".to_string();
+    /// ```
+    pub fn get_mut(&self, db: &Database) -> Result<CellRefMut<'_, T>>
     where
         T: Referable + HasCollectionName,
     {
-        if self.value.is_none() {
+        // Resolve if not already cached
+        if self.value.borrow().is_none() {
             self.resolve(db, T::collection_name())?;
         }
-        self.value
-            .as_mut()
-            .map(|b| b.as_mut())
-            .ok_or_else(|| Error::InvalidValue("Reference resolution failed.".to_string()))
-    }
 
-    /// Get a mutable reference to the resolved value without attempting to resolve it.
-    ///
-    /// Returns an error if the reference hasn't been resolved yet.
-    pub fn get_mut_unchecked(&mut self) -> Result<&mut T> {
-        self.value.as_mut().map(|b| b.as_mut()).ok_or_else(|| {
-            Error::InvalidValue(
-                "Reference not resolved. Use get_mut(&db) to resolve references.".to_string(),
-            )
-        })
+        // Map the RefCell borrow to extract the inner value
+        Ok(CellRefMut::map(self.value.borrow_mut(), |opt| {
+            opt.as_mut().unwrap().as_mut()
+        }))
     }
 
     /// Resolve this reference by fetching from the database.
     ///
-    /// This is used during automatic resolution.
-    pub fn resolve(&mut self, db: &Database, collection_name: &str) -> Result<()>
+    /// This is called automatically by `get()` and `get_mut()`. You typically
+    /// don't need to call this directly unless you're implementing custom logic.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // Manual resolution (usually not needed)
+    /// post.author.resolve(&db, User::collection_name())?;
+    /// assert!(post.author.is_resolved());
+    /// ```
+    pub fn resolve(&self, db: &Database, collection_name: &str) -> Result<()>
     where
         T: Referable,
     {
-        if self.value.is_some() {
+        // Check if already resolved
+        if self.value.borrow().is_some() {
             return Ok(());
         }
 
+        // Fetch from database
         let collection = db.collection::<T>(collection_name)?;
         match collection.get(&self.key)? {
             Some(value) => {
-                self.value = Some(Box::new(value));
+                *self.value.borrow_mut() = Some(Box::new(value));
                 Ok(())
             }
             None => Err(Error::InvalidValue(format!(
@@ -293,8 +312,20 @@ impl<T: Storable> Ref<T> {
     }
 
     /// Consume the Ref and return the inner value if resolved.
+    ///
+    /// Returns `None` if the reference hasn't been resolved yet.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let post = posts.get(&1)?.unwrap();
+    /// let _ = post.author.get(&db)?;  // Resolve first
+    ///
+    /// let author_opt = post.author.into_inner();
+    /// assert!(author_opt.is_some());
+    /// ```
     pub fn into_inner(self) -> Option<T> {
-        self.value.map(|b| *b)
+        self.value.into_inner().map(|b| *b)
     }
 }
 
@@ -310,7 +341,10 @@ impl<T: Storable> BorshDeserialize for Ref<T> {
     fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         // Deserialize only the key, value remains None
         let key = T::Key::deserialize_reader(reader)?;
-        Ok(Ref { key, value: None })
+        Ok(Ref {
+            key,
+            value: RefCell::new(None),
+        })
     }
 }
 
@@ -348,7 +382,7 @@ pub trait HasCollectionName {
 ///
 /// // User has no references, so resolve_all does nothing
 /// impl Referable for User {
-///     fn resolve_all(&mut self, _db: &Database) -> Result<()> {
+///     fn resolve_all(&self, _db: &Database) -> Result<()> {
 ///         Ok(())
 ///     }
 /// }
@@ -367,7 +401,7 @@ pub trait HasCollectionName {
 ///
 /// // Post has a reference to User, so we resolve it
 /// impl Referable for Post {
-///     fn resolve_all(&mut self, db: &Database) -> Result<()> {
+///     fn resolve_all(&self, db: &Database) -> Result<()> {
 ///         self.author.resolve(db, "users")?;
 ///         Ok(())
 ///     }
@@ -379,7 +413,10 @@ pub trait Referable: Storable {
     /// For types without references, this should just return `Ok(())`.
     /// For types with `Ref<T>` fields, call `resolve()` on each field.
     /// For nested references, also call `resolve_all()` on the resolved objects.
-    fn resolve_all(&mut self, db: &Database) -> Result<()>;
+    ///
+    /// This method takes `&self` instead of `&mut self` because references use
+    /// interior mutability (`RefCell`) for lazy loading.
+    fn resolve_all(&self, db: &Database) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -405,8 +442,7 @@ mod tests {
         let key = 42u64;
         let reference = Ref::<TestType>::new(key);
         assert_eq!(reference.key(), &42);
-        // Reference value is None initially
-        assert!(reference.value.is_none());
+        assert!(!reference.is_resolved());
     }
 
     #[test]
@@ -430,9 +466,11 @@ mod tests {
         };
         let reference = Ref::from_value(value.clone());
         assert_eq!(reference.key(), &42);
-        // Value is cached when created with from_value
-        assert!(reference.value.is_some());
-        assert_eq!(reference.value.as_ref().unwrap().as_ref(), &value);
+        assert!(reference.is_resolved());
+
+        let inner = reference.into_inner();
+        assert!(inner.is_some());
+        assert_eq!(inner.unwrap(), value);
     }
 
     #[test]
@@ -456,6 +494,32 @@ mod tests {
 
         assert_eq!(reference.key(), decoded.key());
         // Decoded reference is not resolved (value is None)
-        assert!(decoded.value.is_none());
+        assert!(!decoded.is_resolved());
+    }
+
+    #[test]
+    fn test_ref_is_resolved() {
+        #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
+        struct TestType {
+            id: u64,
+            value: String,
+        }
+
+        impl Storable for TestType {
+            type Key = u64;
+            fn key(&self) -> Self::Key {
+                self.id
+            }
+        }
+
+        let unresolved = Ref::<TestType>::new(42);
+        assert!(!unresolved.is_resolved());
+
+        let value = TestType {
+            id: 42,
+            value: "test".to_string(),
+        };
+        let resolved = Ref::from_value(value);
+        assert!(resolved.is_resolved());
     }
 }

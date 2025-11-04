@@ -1,6 +1,7 @@
 //! Nested references example for NGDB
 //!
-//! Demonstrates relationships between objects with automatic reference resolution.
+//! Demonstrates relationships between objects with automatic reference resolution
+//! using the new immutable API with interior mutability.
 
 use ngdb::{DatabaseConfig, Ref, Result, Storable, ngdb};
 
@@ -56,6 +57,7 @@ fn main() -> Result<()> {
         .add_column_family("comments")
         .open()?;
 
+    // Create and save a user
     let alice = User {
         id: 1,
         name: "Alice".to_string(),
@@ -63,6 +65,7 @@ fn main() -> Result<()> {
     };
     alice.save(&db)?;
 
+    // Create and save a post with a reference to the user
     let post = Post {
         id: 1,
         title: "Introduction to NGDB".to_string(),
@@ -71,6 +74,7 @@ fn main() -> Result<()> {
     };
     post.save(&db)?;
 
+    // Create and save comments
     Comment {
         id: 1,
         text: "Great article!".to_string(),
@@ -95,52 +99,98 @@ fn main() -> Result<()> {
     }
     .save(&db)?;
 
+    println!("=== Example 1: Manual reference resolution (no mut needed!) ===\n");
+
     let comments = Comment::collection(&db)?;
 
-    // Example 1: Using get() - references are NOT resolved automatically
-    // You must call .get(&db) on each Ref field to resolve it
-    let mut comment1 = comments.get(&1)?.unwrap();
+    // Notice: No mut needed! The new API uses interior mutability
+    let comment1 = comments.get(&1)?.unwrap();
     println!("Comment: '{}'", comment1.text);
 
-    // Call .get(&db) to automatically resolve the author reference
+    // First call: Resolves from DB and caches
     let author = comment1.author.get(&db)?;
     println!("Author: {} ({})", author.name, author.email);
+    drop(author); // Drop the borrow
 
-    // Call .get_mut(&db) to automatically resolve the post reference
-    let post = comment1.post.get_mut(&db)?;
+    // Access the post reference - also auto-resolves
+    let post = comment1.post.get(&db)?;
     println!("Post: '{}'", post.title);
 
-    // Nested references are also auto-resolved
+    // Nested references work seamlessly
     let post_author = post.author.get(&db)?;
     println!("Post Author: {}", post_author.name);
 
-    // Example 2: Using get_with_refs() - ALL references are resolved automatically
-    // You can use .get_unchecked() to access already-resolved references
-    let resolved = comments.get_with_refs(&1, &db)?.unwrap();
+    println!("\n=== Example 2: Multiple accesses use cached value ===\n");
+
+    let comment2 = comments.get(&2)?.unwrap();
+
+    // Check resolution status
+    println!("Is author resolved? {}", comment2.author.is_resolved());
+
+    // First access - resolves from DB
+    let author = comment2.author.get(&db)?;
+    println!("First access: {}", author.name);
+    drop(author);
+
+    // Now it's resolved and cached
+    println!("Is author resolved? {}", comment2.author.is_resolved());
+
+    // Second access - uses cached value, no DB query!
+    let author_name = comment2.author.get(&db)?.name.clone();
+    let author_email = comment2.author.get(&db)?.email.clone();
+    println!("Cached access: {} <{}>", author_name, author_email);
+
+    println!("\n=== Example 3: get_with_refs() resolves everything upfront ===\n");
+
+    // This resolves ALL references recursively
+    let resolved = comments.get_with_refs(&3, &db)?.unwrap();
     println!("Comment: '{}'", resolved.text);
+
+    // All references are already resolved, so these are instant
     println!(
         "Author: {} ({})",
-        resolved.author.get_unchecked()?.name,
-        resolved.author.get_unchecked()?.email
-    );
-    println!("Post: '{}'", resolved.post.get_unchecked()?.title);
-    println!(
-        "Post Author: {}",
-        resolved.post.get_unchecked()?.author.get_unchecked()?.name
+        resolved.author.get(&db)?.name,
+        resolved.author.get(&db)?.email
     );
 
-    // Batch retrieval with get_many_with_refs()
+    println!("Post: '{}'", resolved.post.get(&db)?.title);
+    println!(
+        "Post Author: {}",
+        resolved.post.get(&db)?.author.get(&db)?.name
+    );
+
+    println!("\n=== Example 4: Batch retrieval ===\n");
+
     let ids = vec![1, 2, 3];
     let all_comments = comments.get_many_with_refs(&ids, &db)?;
 
-    println!("\nAll comments (with get_many_with_refs):");
+    println!("All comments (batch loaded with references resolved):");
     for comment in all_comments.into_iter().flatten() {
-        println!(
-            "'{}' by {}",
-            comment.text,
-            comment.author.get_unchecked()?.name
-        );
+        println!("  '{}' by {}", comment.text, comment.author.get(&db)?.name);
     }
+
+    println!("\n=== Example 5: Mutable access ===\n");
+
+    let comment = comments.get(&1)?.unwrap();
+
+    // Get mutable reference - still auto-resolves!
+    let mut author = comment.author.get_mut(&db)?;
+    let old_name = author.name.clone();
+    author.name = "Alice Smith".to_string();
+    println!(
+        "Changed author name from '{}' to '{}'",
+        old_name, author.name
+    );
+
+    // Note: This doesn't persist to DB unless you save
+    // Just demonstrating mutable access works
+
+    println!("\n✅ All examples completed successfully!");
+    println!("Key takeaways:");
+    println!("  • No 'mut' needed on parent structs");
+    println!("  • First .get() resolves from DB, subsequent calls use cache");
+    println!("  • No more get_unchecked() - just use .get() everywhere");
+    println!("  • Cleaner, more intuitive API!");
 
     Ok(())
 }
