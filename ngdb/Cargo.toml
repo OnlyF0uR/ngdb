@@ -1,6 +1,6 @@
 [package]
 name = "ngdb"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2024"
 authors = ["OnlyF0uR"]
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,7 @@ rocksdb = { version = "0.24", default-features = false, features = ["lz4", "mult
 borsh = { version = "1.5", features = ["derive"] }
 blake3 = "1.8"
 tracing = "0.1"
-ngdb_macros = { path = "../ngdb_macros", version = "0.2.0" }
+ngdb_macros = { path = "../ngdb_macros", version = "0.2.1" }
 
 [target.'cfg(not(windows))'.dependencies.rocksdb]
 version = "0.24"
